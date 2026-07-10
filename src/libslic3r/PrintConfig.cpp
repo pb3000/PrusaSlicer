@@ -2017,6 +2017,17 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("async_infill", coBool);
+    def->label = L("Asynchronous infill (one layer below)");
+    def->tooltip = L("Prints sparse internal infill one layer below the perimeters. During each layer the "
+                     "nozzle dips down to the previous layer height, lays the sparse infill there and rises "
+                     "back up before printing the walls. Because the current layer's cavity is still empty "
+                     "while its walls are printed, the infill cannot bleed through into the outer walls, and "
+                     "after a tool change the infill printed at the lower layer can be used as a wipe target. "
+                     "The first layer, the top layer and bridges are always printed with their infill in place.");
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionBool(false));
+
     // def = this->add("infill_only_where_needed", coBool);
     // def->label = L("Only infill where needed");
     // def->category = L("Infill");

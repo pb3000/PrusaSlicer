@@ -222,6 +222,13 @@ std::vector<std::reference_wrapper<const LayerIsland>> get_ordered_islands(
     return islands_to_order;
 }
 
+// Asynchronous infill: a layer defers its sparse internal infill to the pass of the layer above
+// (printed one layer below the walls) only if it has both a layer below and a layer above. This
+// keeps the first layer, the top layer and thus bridges/top-bottom shells printed in place.
+bool layer_defers_infill(const Layer &layer, const Print &print) {
+    return print.config().async_infill && layer.lower_layer != nullptr && layer.upper_layer != nullptr;
+}
+
 std::vector<IslandExtrusions> extract_island_extrusions(
     const LayerSlice &lslice,
     const Print &print,
@@ -230,10 +237,16 @@ std::vector<IslandExtrusions> extract_island_extrusions(
     const PathSmoothingFunction &smooth_path,
     const Point &offset,
     const unsigned extruder_id,
-    std::optional<Point> &previous_position
+    std::optional<Point> &previous_position,
+    const bool skip_sparse_infill
 ) {
-    const auto should_pick_infill = [&should_pick_extrusion](const ExtrusionEntityCollection &eec, const PrintRegion &region) {
-        return should_pick_extrusion(eec, region) && eec.role() != ExtrusionRole::Ironing;
+    const auto should_pick_infill = [&should_pick_extrusion, skip_sparse_infill](const ExtrusionEntityCollection &eec, const PrintRegion &region) {
+        if (eec.role() == ExtrusionRole::Ironing)
+            return false;
+        // Sparse internal infill is emitted separately at the layer below (asynchronous infill).
+        if (skip_sparse_infill && eec.role().is_sparse_infill())
+            return false;
+        return should_pick_extrusion(eec, region);
     };
 
     std::vector<std::reference_wrapper<const LayerIsland>> ordered_islands = get_ordered_islands(lslice, previous_position);
@@ -295,6 +308,35 @@ std::vector<InfillRange> extract_ironing_extrusions(
     return result;
 }
 
+// Asynchronous infill: collect the sparse internal infill of a whole layer (the layer below the
+// one currently being printed), so it can be emitted at that layer's Z during the current pass.
+std::vector<InfillRange> extract_deferred_infill_extrusions(
+    const Print &print,
+    const Layer &lower_layer,
+    const ExtractEntityPredicate &should_pick_extrusion,
+    const PathSmoothingFunction &smooth_path,
+    const Point &offset,
+    const unsigned extruder_id,
+    std::optional<Point> &previous_position
+) {
+    const auto should_pick_sparse_infill = [&should_pick_extrusion](const ExtrusionEntityCollection &eec, const PrintRegion &region) {
+        return eec.role().is_sparse_infill() && should_pick_extrusion(eec, region);
+    };
+
+    std::vector<InfillRange> result;
+    for (size_t idx : lower_layer.lslice_indices_sorted_by_print_order) {
+        const LayerSlice &lslice = lower_layer.lslices_ex[idx];
+        for (const LayerIsland &island : get_ordered_islands(lslice, previous_position)) {
+            std::vector<InfillRange> ranges{extract_infill_ranges(
+                print, lower_layer, island, offset, previous_position, should_pick_sparse_infill, smooth_path, extruder_id
+            )};
+            for (InfillRange &range : ranges)
+                result.push_back(std::move(range));
+        }
+    }
+    return result;
+}
+
 std::vector<SliceExtrusions> get_slices_extrusions(
     const Print &print,
     const Layer &layer,
@@ -302,7 +344,10 @@ std::vector<SliceExtrusions> get_slices_extrusions(
     const PathSmoothingFunction &smooth_path,
     const Point &offset,
     const unsigned extruder_id,
-    std::optional<Point> &previous_position
+    std::optional<Point> &previous_position,
+    // Asynchronous infill: when true this layer's own sparse infill is skipped here (it is emitted
+    // one layer higher, during the pass of the layer above, at this layer's Z).
+    const bool skip_own_sparse_infill
 ) {
     // Note: ironing.
     // FIXME move ironing into the loop above over LayerIslands?
@@ -315,7 +360,7 @@ std::vector<SliceExtrusions> get_slices_extrusions(
     for (size_t idx : layer.lslice_indices_sorted_by_print_order) {
         const LayerSlice &lslice = layer.lslices_ex[idx];
         std::vector<IslandExtrusions> island_extrusions{extract_island_extrusions(
-            lslice, print, layer, should_pick_extrusion, smooth_path, offset, extruder_id, previous_position
+            lslice, print, layer, should_pick_extrusion, smooth_path, offset, extruder_id, previous_position, skip_own_sparse_infill
         )};
         std::vector<InfillRange> ironing_extrusions{extract_ironing_extrusions(
             lslice, print, layer, should_pick_extrusion, smooth_path, offset, extruder_id, previous_position
@@ -327,6 +372,18 @@ std::vector<SliceExtrusions> get_slices_extrusions(
         }
     }
     return result;
+}
+
+// Asynchronous infill: attach infill carried over from the layer below to the first slice (a slice
+// is created if this extruder prints nothing else on the current layer). It is emitted once, at
+// deferred_print_z, before that slice's perimeters.
+void attach_deferred_infill(std::vector<SliceExtrusions> &slices, std::vector<InfillRange> deferred, const double deferred_print_z) {
+    if (deferred.empty())
+        return;
+    if (slices.empty())
+        slices.emplace_back();
+    slices.front().deferred_infill_extrusions = std::move(deferred);
+    slices.front().deferred_print_z           = deferred_print_z;
 }
 
 unsigned translate_support_extruder(
@@ -435,8 +492,10 @@ std::vector<OverridenExtrusions> get_overriden_extrusions(
             const PrintObject &print_object{instance.print_object};
             const Point &offset{print_object.instances()[instance.instance_id].shift};
 
+            // Wipe (overriding) extrusions are always printed on their own layer, so asynchronous
+            // infill never skips or defers them here.
             std::vector<SliceExtrusions> slices_extrusions{get_slices_extrusions(
-                print, *layer, should_pick_extrusion, smooth_path, offset, extruder_id, previous_position
+                print, *layer, should_pick_extrusion, smooth_path, offset, extruder_id, previous_position, /*skip_own_sparse_infill*/ false
             )};
             result.push_back({offset, std::move(slices_extrusions)});
         }
@@ -448,12 +507,27 @@ std::vector<NormalExtrusions> get_normal_extrusions(
     const Print &print,
     const GCode::ObjectsLayerToPrint &layers,
     const LayerTools &layer_tools,
+    const ToolOrdering &tool_ordering,
     const std::vector<InstanceToPrint> &instances_to_print,
     const unsigned int extruder_id,
     const PathSmoothingFunction &smooth_path,
     std::optional<Point> &previous_position
 ) {
     std::vector<NormalExtrusions> result;
+
+    // Builds the "print with this extruder, not overridden for wiping" predicate against a given
+    // layer's tool ordering. Used both for the current layer and, for asynchronous infill, for the
+    // layer below (whose non-overridden sparse infill is emitted during this pass).
+    const auto make_should_pick = [&extruder_id](
+        const LayerTools &tools, const std::size_t instance_id) {
+        return [&tools, instance_id, &extruder_id](const ExtrusionEntityCollection &entity_collection, const PrintRegion &region) {
+            if (is_overriden(entity_collection, tools, instance_id))
+                return false;
+            if (get_extruder_id(entity_collection, tools, region, instance_id) != static_cast<int>(extruder_id))
+                return false;
+            return true;
+        };
+    };
 
     for (std::size_t i{0}; i < instances_to_print.size(); ++i) {
         const InstanceToPrint &instance{instances_to_print[i]};
@@ -475,16 +549,10 @@ std::vector<NormalExtrusions> get_normal_extrusions(
         }
 
         if (const Layer *layer = layers[instance.object_layer_to_print_id].object_layer; layer) {
-            const auto should_pick_extrusion{[&layer_tools, &instance, &extruder_id](const ExtrusionEntityCollection &entity_collection, const PrintRegion &region){
-                if (is_overriden(entity_collection, layer_tools, instance.instance_id)) {
-                    return false;
-                }
+            const auto should_pick_extrusion{make_should_pick(layer_tools, instance.instance_id)};
 
-                if (get_extruder_id(entity_collection, layer_tools, region, instance.instance_id) != static_cast<int>(extruder_id)) {
-                    return false;
-                }
-                return true;
-            }};
+            // Asynchronous infill: this layer's own sparse infill is deferred to the layer above.
+            const bool skip_own_sparse_infill{layer_defers_infill(*layer, print)};
 
             result.back().slices_extrusions = get_slices_extrusions(
                 print,
@@ -493,8 +561,23 @@ std::vector<NormalExtrusions> get_normal_extrusions(
                 smooth_path,
                 offset,
                 extruder_id,
-                previous_position
+                previous_position,
+                skip_own_sparse_infill
             );
+
+            // Asynchronous infill: emit the sparse infill deferred from the layer below (if that
+            // layer deferred it) at the lower layer's Z, before this layer's walls. The layer below
+            // is resolved against its own tool ordering, so infill that was overridden for wiping
+            // there (and thus already printed on its own layer) is correctly excluded here.
+            if (layer->lower_layer != nullptr && layer_defers_infill(*layer->lower_layer, print)) {
+                const Layer &lower_layer{*layer->lower_layer};
+                const LayerTools &lower_layer_tools{tool_ordering.tools_for_layer(lower_layer.print_z)};
+                const auto should_pick_deferred{make_should_pick(lower_layer_tools, instance.instance_id)};
+                std::vector<InfillRange> deferred_infill{extract_deferred_infill_extrusions(
+                    print, lower_layer, should_pick_deferred, smooth_path, offset, extruder_id, previous_position
+                )};
+                attach_deferred_infill(result.back().slices_extrusions, std::move(deferred_infill), lower_layer.print_z);
+            }
         }
     }
     return result;
@@ -508,6 +591,9 @@ bool is_empty(const std::vector<SliceExtrusions> &extrusions) {
             }
         }
         if (!slice_extrusions.ironing_extrusions.empty()) {
+            return false;
+        }
+        if (!slice_extrusions.deferred_infill_extrusions.empty()) {
             return false;
         }
     }
@@ -538,6 +624,7 @@ std::vector<ExtruderExtrusions> get_extrusions(
     const GCode::ObjectsLayerToPrint &layers,
     const bool is_first_layer,
     const LayerTools &layer_tools,
+    const ToolOrdering &tool_ordering,
     const std::vector<InstanceToPrint> &instances_to_print,
     const std::map<unsigned int, std::pair<size_t, size_t>> &skirt_loops_per_extruder,
     unsigned current_extruder_id,
@@ -613,7 +700,7 @@ std::vector<ExtruderExtrusions> get_extrusions(
 
         using GCode::ExtrusionOrder::get_normal_extrusions;
         extruder_extrusions.normal_extrusions = get_normal_extrusions(
-            print, layers, layer_tools, instances_to_print, extruder_id, smooth_path,
+            print, layers, layer_tools, tool_ordering, instances_to_print, extruder_id, smooth_path,
             previous_position
         );
 
@@ -681,6 +768,10 @@ std::optional<Geometry::ArcWelder::Segment> get_first_point(const std::vector<Is
 
 std::optional<Geometry::ArcWelder::Segment> get_first_point(const std::vector<SliceExtrusions> &extrusions) {
     for (const SliceExtrusions &slice : extrusions) {
+        // Deferred infill is emitted before the common extrusions, so it is the first point.
+        if (auto result = get_first_point(slice.deferred_infill_extrusions)) {
+            return result;
+        }
         if (auto result = get_first_point(slice.common_extrusions)) {
             return result;
         }

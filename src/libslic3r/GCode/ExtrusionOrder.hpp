@@ -96,6 +96,11 @@ struct IslandExtrusions {
 struct SliceExtrusions {
     std::vector<IslandExtrusions> common_extrusions;
     std::vector<InfillRange> ironing_extrusions;
+    // Asynchronous infill (see PrintConfig::async_infill): sparse internal infill taken from the
+    // layer below, to be printed at deferred_print_z (one layer below the perimeters of this slice)
+    // before the common extrusions. Empty unless async_infill is enabled and this layer is eligible.
+    std::vector<InfillRange> deferred_infill_extrusions;
+    double deferred_print_z{0.};
 };
 
 struct SupportPath {
@@ -152,6 +157,9 @@ std::vector<ExtruderExtrusions> get_extrusions(
     const GCode::ObjectsLayerToPrint &layers,
     const bool is_first_layer,
     const LayerTools &layer_tools,
+    // Full tool ordering, used by the asynchronous infill feature to resolve the extruder
+    // assignment / wipe overrides of the layer below (whose infill is printed in this pass).
+    const ToolOrdering &tool_ordering,
     const std::vector<InstanceToPrint> &instances_to_print,
     const std::map<unsigned int, std::pair<size_t, size_t>> &skirt_loops_per_extruder,
     unsigned current_extruder_id,

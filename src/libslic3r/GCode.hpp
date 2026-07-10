@@ -235,6 +235,7 @@ private:
         const Print &print,
         const ObjectsLayerToPrint &layers,
         const LayerTools &layer_tools,
+        const ToolOrdering &tool_ordering,
         const std::vector<InstanceToPrint> &instances_to_print,
         const GCode::SmoothPathCaches &smooth_path_caches,
         const bool first_layer
@@ -245,6 +246,8 @@ private:
         // Set of object & print layers of the same PrintObject and with the same print_z.
         const ObjectsLayerToPrint       &layers,
         const LayerTools  				&layer_tools,
+        // Full tool ordering, forwarded to get_sorted_extrusions for the asynchronous infill feature.
+        const ToolOrdering              &tool_ordering,
         const GCode::SmoothPathCaches   &smooth_path_caches,
         const bool                       last_layer,
 		// Pairs of PrintObject index and its instance index.

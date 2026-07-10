@@ -1588,8 +1588,8 @@ void GCodeGenerator::process_layers(
                 if (m_wipe_tower && layer_tools.has_wipe_tower)
                     m_wipe_tower->next_layer();
                 print.throw_if_canceled();
-                return this->process_layer(print, layer.second, layer_tools, 
-                    GCode::SmoothPathCaches{ smooth_path_cache_global, in.second }, 
+                return this->process_layer(print, layer.second, layer_tools, tool_ordering,
+                    GCode::SmoothPathCaches{ smooth_path_cache_global, in.second },
                     &layer == &layers_to_print.back(), &print_object_instances_ordering, size_t(-1));
             }
         });
@@ -1682,8 +1682,8 @@ void GCodeGenerator::process_layers(
             } else {
                 ObjectLayerToPrint &layer = layers_to_print[layer_to_print_idx];
                 print.throw_if_canceled();
-                return this->process_layer(print, { std::move(layer) }, tool_ordering.tools_for_layer(layer.print_z()), 
-                    GCode::SmoothPathCaches{ smooth_path_cache_global, in.second }, 
+                return this->process_layer(print, { std::move(layer) }, tool_ordering.tools_for_layer(layer.print_z()), tool_ordering,
+                    GCode::SmoothPathCaches{ smooth_path_cache_global, in.second },
                     &layer == &layers_to_print.back(), nullptr, single_object_idx);
             }
         });
@@ -2500,6 +2500,7 @@ std::vector<GCode::ExtrusionOrder::ExtruderExtrusions> GCodeGenerator::get_sorte
     const Print &print,
     const ObjectsLayerToPrint &layers,
     const LayerTools &layer_tools,
+    const ToolOrdering &tool_ordering,
     const std::vector<InstanceToPrint> &instances_to_print,
     const GCode::SmoothPathCaches &smooth_path_caches,
     const bool first_layer
@@ -2533,6 +2534,7 @@ std::vector<GCode::ExtrusionOrder::ExtruderExtrusions> GCodeGenerator::get_sorte
             layers,
             first_layer,
             layer_tools,
+            tool_ordering,
             instances_to_print,
             skirt_loops_per_extruder,
             this->m_writer.extruder()->id(),
@@ -2557,6 +2559,7 @@ LayerResult GCodeGenerator::process_layer(
     // Set of object & print layers of the same PrintObject and with the same print_z.
     const ObjectsLayerToPrint           	&layers,
     const LayerTools        		        &layer_tools,
+    const ToolOrdering                      &tool_ordering,
     const GCode::SmoothPathCaches           &smooth_path_caches,
     const bool                               last_layer,
     // Pairs of PrintObject index and its instance index.
@@ -2622,7 +2625,7 @@ LayerResult GCodeGenerator::process_layer(
 
     using GCode::ExtrusionOrder::ExtruderExtrusions;
     const std::vector<ExtruderExtrusions> extrusions{
-        this->get_sorted_extrusions(print, layers, layer_tools, instances_to_print, smooth_path_caches, first_layer)};
+        this->get_sorted_extrusions(print, layers, layer_tools, tool_ordering, instances_to_print, smooth_path_caches, first_layer)};
 
     if (extrusions.empty()) {
         return result;
@@ -2938,6 +2941,22 @@ std::string GCodeGenerator::extrude_slices(
 
     std::string gcode;
     for (const SliceExtrusions &slice_extrusions : slices_extrusions) {
+        // Asynchronous infill (PrintConfig::async_infill): print the sparse infill carried over
+        // from the layer below at its own (lower) Z, before this slice's perimeters. The nozzle
+        // dips to the previous layer height, lays the infill into the already-closed cavity of the
+        // layer below and rises back up, so the current layer's walls are printed against an empty
+        // cavity and the infill cannot bleed through into the outer walls. The height tracker
+        // m_last_layer_z is redirected for the duration of the block so the per-path travel/flow
+        // logic (which derives its Z from it) targets the lower layer.
+        if (!slice_extrusions.deferred_infill_extrusions.empty()) {
+            const float saved_layer_z{m_last_layer_z};
+            m_last_layer_z = static_cast<float>(slice_extrusions.deferred_print_z);
+            gcode += m_writer.travel_to_z(m_last_layer_z, "descend for asynchronous infill");
+            gcode += this->extrude_infill_ranges(slice_extrusions.deferred_infill_extrusions, "infill");
+            m_last_layer_z = saved_layer_z;
+            gcode += m_writer.travel_to_z(m_last_layer_z, "rise after asynchronous infill");
+        }
+
         for (const IslandExtrusions &island_extrusions : slice_extrusions.common_extrusions) {
             if (island_extrusions.infill_first) {
                 gcode += this->extrude_infill_ranges(island_extrusions.infill_ranges, "infill");
