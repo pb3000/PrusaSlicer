@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cassert>
 #include <cinttypes>
+#include <set>
+
+#include "libslic3r/ClipperUtils.hpp"
 
 #include "libslic3r/GCode/SmoothPath.hpp"
 #include "libslic3r/ShortestPath.hpp"
@@ -229,6 +232,61 @@ bool layer_defers_infill(const Layer &layer, const Print &print) {
     return print.config().async_infill && layer.lower_layer != nullptr && layer.upper_layer != nullptr;
 }
 
+// Asynchronous infill accessibility check (level A, all-or-nothing per region).
+// def_layer's sparse infill is printed one layer up, during the pass of def_layer.upper_layer. Returns
+// the set of print_region_ids of def_layer whose infill would then be covered by taller material of a
+// tool printed earlier in that upper layer, so the nozzle could no longer reach it. Such regions must
+// NOT be deferred (printed in place instead). The obstacle is inflated by the nozzle tip clearance
+// (tip outer radius - orifice radius): the infill extrudate legitimately reaches the orifice, only the
+// metal tip's overhang needs to clear. Single-tool upper layers are accessible by construction.
+std::set<int> blocked_infill_regions(const Print &print, const Layer &def_layer, const ToolOrdering &tool_ordering) {
+    std::set<int> blocked;
+    const Layer *upper = def_layer.upper_layer;
+    if (upper == nullptr)
+        return blocked;
+    const LayerTools &upper_tools = tool_ordering.tools_for_layer(upper->print_z);
+    if (upper_tools.extruders.size() <= 1)
+        return blocked;
+
+    const auto order_pos = [&upper_tools](int extruder_one_based) -> int {
+        for (size_t i = 0; i < upper_tools.extruders.size(); ++ i)
+            if (int(upper_tools.extruders[i]) == extruder_one_based)
+                return int(i);
+        return int(upper_tools.extruders.size());
+    };
+
+    const double tip_outer = print.config().nozzle_tip_outer_diameter.value;
+
+    for (size_t r = 0; r < def_layer.region_count(); ++ r) {
+        const LayerRegion *rl = def_layer.get_region(int(r));
+        if (rl == nullptr || rl->slices().surfaces.empty())
+            continue;
+        const int infill_tool = rl->region().config().infill_extruder.value; // 1-based
+        const int tR_pos = order_pos(infill_tool);
+        if (tR_pos <= 0)
+            continue; // nothing prints before this tool on the covering layer
+
+        const double nozzle_inner = print.config().nozzle_diameter.get_at(std::max(0, infill_tool - 1));
+        const double clearance    = std::max(0., (tip_outer - nozzle_inner) / 2.);
+
+        Polygons obstacle;
+        for (size_t q = 0; q < upper->region_count(); ++ q) {
+            const LayerRegion *ql = upper->get_region(int(q));
+            if (ql == nullptr || ql->slices().surfaces.empty())
+                continue;
+            if (order_pos(ql->region().config().perimeter_extruder.value) < tR_pos) {
+                Polygons qoff = offset(ql->slices().surfaces, float(scaled<double>(clearance)));
+                obstacle.insert(obstacle.end(), qoff.begin(), qoff.end());
+            }
+        }
+        if (obstacle.empty())
+            continue;
+        if (! intersection(rl->slices().surfaces, obstacle).empty())
+            blocked.insert(rl->region().print_region_id());
+    }
+    return blocked;
+}
+
 std::vector<IslandExtrusions> extract_island_extrusions(
     const LayerSlice &lslice,
     const Print &print,
@@ -238,17 +296,12 @@ std::vector<IslandExtrusions> extract_island_extrusions(
     const Point &offset,
     const unsigned extruder_id,
     std::optional<Point> &previous_position,
-    const bool skip_sparse_infill
+    // Asynchronous infill: when true this layer defers its sparse infill (printed one layer up),
+    // except for regions in blocked_regions (keyed by print_region_id) whose deferred infill would
+    // be inaccessible - those are printed in place with infill_first (fallback).
+    const bool layer_defers,
+    const std::set<int> &blocked_regions
 ) {
-    const auto should_pick_infill = [&should_pick_extrusion, skip_sparse_infill](const ExtrusionEntityCollection &eec, const PrintRegion &region) {
-        if (eec.role() == ExtrusionRole::Ironing)
-            return false;
-        // Sparse internal infill is emitted separately at the layer below (asynchronous infill).
-        if (skip_sparse_infill && eec.role().is_sparse_infill())
-            return false;
-        return should_pick_extrusion(eec, region);
-    };
-
     std::vector<std::reference_wrapper<const LayerIsland>> ordered_islands = get_ordered_islands(lslice, previous_position);
 
     std::vector<IslandExtrusions> result;
@@ -259,11 +312,25 @@ std::vector<IslandExtrusions> extract_island_extrusions(
         // accross the whole print uniquely. Translate to a Print specific PrintRegion.
         const PrintRegion &region = print.get_print_region(layerm.region().print_region_id());
 
+        const bool region_blocked{layer_defers && blocked_regions.count(region.print_region_id()) > 0};
+        // Defer this region's sparse infill only if the layer defers and the region is accessible;
+        // a blocked region keeps its sparse infill and prints it in place, infill-first (fallback a).
+        const bool skip_sparse_infill{layer_defers && ! region_blocked};
+
+        const auto should_pick_infill = [&should_pick_extrusion, skip_sparse_infill](const ExtrusionEntityCollection &eec, const PrintRegion &region) {
+            if (eec.role() == ExtrusionRole::Ironing)
+                return false;
+            // Sparse internal infill is emitted separately at the layer below (asynchronous infill).
+            if (skip_sparse_infill && eec.role().is_sparse_infill())
+                return false;
+            return should_pick_extrusion(eec, region);
+        };
+
         result.push_back(IslandExtrusions{&region});
         IslandExtrusions &island_extrusions{result.back()};
-        island_extrusions.infill_first = print.config().infill_first;
+        island_extrusions.infill_first = region_blocked ? true : print.config().infill_first;
 
-        if (print.config().infill_first) {
+        if (island_extrusions.infill_first) {
             island_extrusions.infill_ranges = extract_infill_ranges(
                 print, layer, island, offset, previous_position, should_pick_infill, smooth_path, extruder_id
             );
@@ -317,10 +384,17 @@ std::vector<InfillRange> extract_deferred_infill_extrusions(
     const PathSmoothingFunction &smooth_path,
     const Point &offset,
     const unsigned extruder_id,
-    std::optional<Point> &previous_position
+    std::optional<Point> &previous_position,
+    // Regions (by print_region_id) whose infill is inaccessible when deferred - not pulled here,
+    // they are printed in place on the lower layer instead (kept consistent with the skip logic).
+    const std::set<int> &blocked_regions
 ) {
-    const auto should_pick_sparse_infill = [&should_pick_extrusion](const ExtrusionEntityCollection &eec, const PrintRegion &region) {
-        return eec.role().is_sparse_infill() && should_pick_extrusion(eec, region);
+    const auto should_pick_sparse_infill = [&should_pick_extrusion, &blocked_regions](const ExtrusionEntityCollection &eec, const PrintRegion &region) {
+        if (! eec.role().is_sparse_infill())
+            return false;
+        if (blocked_regions.count(region.print_region_id()) > 0)
+            return false;
+        return should_pick_extrusion(eec, region);
     };
 
     std::vector<InfillRange> result;
@@ -345,9 +419,10 @@ std::vector<SliceExtrusions> get_slices_extrusions(
     const Point &offset,
     const unsigned extruder_id,
     std::optional<Point> &previous_position,
-    // Asynchronous infill: when true this layer's own sparse infill is skipped here (it is emitted
-    // one layer higher, during the pass of the layer above, at this layer's Z).
-    const bool skip_own_sparse_infill
+    // Asynchronous infill: when true this layer defers its sparse infill (printed one layer up),
+    // except for the blocked_regions (by print_region_id), which are printed in place infill-first.
+    const bool layer_defers,
+    const std::set<int> &blocked_regions
 ) {
     // Note: ironing.
     // FIXME move ironing into the loop above over LayerIslands?
@@ -360,7 +435,7 @@ std::vector<SliceExtrusions> get_slices_extrusions(
     for (size_t idx : layer.lslice_indices_sorted_by_print_order) {
         const LayerSlice &lslice = layer.lslices_ex[idx];
         std::vector<IslandExtrusions> island_extrusions{extract_island_extrusions(
-            lslice, print, layer, should_pick_extrusion, smooth_path, offset, extruder_id, previous_position, skip_own_sparse_infill
+            lslice, print, layer, should_pick_extrusion, smooth_path, offset, extruder_id, previous_position, layer_defers, blocked_regions
         )};
         std::vector<InfillRange> ironing_extrusions{extract_ironing_extrusions(
             lslice, print, layer, should_pick_extrusion, smooth_path, offset, extruder_id, previous_position
@@ -495,7 +570,7 @@ std::vector<OverridenExtrusions> get_overriden_extrusions(
             // Wipe (overriding) extrusions are always printed on their own layer, so asynchronous
             // infill never skips or defers them here.
             std::vector<SliceExtrusions> slices_extrusions{get_slices_extrusions(
-                print, *layer, should_pick_extrusion, smooth_path, offset, extruder_id, previous_position, /*skip_own_sparse_infill*/ false
+                print, *layer, should_pick_extrusion, smooth_path, offset, extruder_id, previous_position, /*layer_defers_infill*/ false, {}
             )};
             result.push_back({offset, std::move(slices_extrusions)});
         }
@@ -551,8 +626,12 @@ std::vector<NormalExtrusions> get_normal_extrusions(
         if (const Layer *layer = layers[instance.object_layer_to_print_id].object_layer; layer) {
             const auto should_pick_extrusion{make_should_pick(layer_tools, instance.instance_id)};
 
-            // Asynchronous infill: this layer's own sparse infill is deferred to the layer above.
-            const bool skip_own_sparse_infill{layer_defers_infill(*layer, print)};
+            // Asynchronous infill: this layer defers its own sparse infill to the layer above,
+            // except for regions whose deferred infill would be inaccessible (blocked_own) - those
+            // are printed in place, infill-first (fallback a). Accessibility is resolved against the
+            // covering (upper) layer's tool ordering.
+            const bool defers{layer_defers_infill(*layer, print)};
+            const std::set<int> blocked_own{defers ? blocked_infill_regions(print, *layer, tool_ordering) : std::set<int>{}};
 
             result.back().slices_extrusions = get_slices_extrusions(
                 print,
@@ -562,19 +641,23 @@ std::vector<NormalExtrusions> get_normal_extrusions(
                 offset,
                 extruder_id,
                 previous_position,
-                skip_own_sparse_infill
+                defers,
+                blocked_own
             );
 
             // Asynchronous infill: emit the sparse infill deferred from the layer below (if that
             // layer deferred it) at the lower layer's Z, before this layer's walls. The layer below
             // is resolved against its own tool ordering, so infill that was overridden for wiping
-            // there (and thus already printed on its own layer) is correctly excluded here.
+            // there (and thus already printed on its own layer) is correctly excluded here. Regions
+            // whose deferred infill is inaccessible are skipped here - they were printed in place on
+            // the lower layer's own pass (consistent with blocked_own computed there).
             if (layer->lower_layer != nullptr && layer_defers_infill(*layer->lower_layer, print)) {
                 const Layer &lower_layer{*layer->lower_layer};
                 const LayerTools &lower_layer_tools{tool_ordering.tools_for_layer(lower_layer.print_z)};
                 const auto should_pick_deferred{make_should_pick(lower_layer_tools, instance.instance_id)};
+                const std::set<int> blocked_lower{blocked_infill_regions(print, lower_layer, tool_ordering)};
                 std::vector<InfillRange> deferred_infill{extract_deferred_infill_extrusions(
-                    print, lower_layer, should_pick_deferred, smooth_path, offset, extruder_id, previous_position
+                    print, lower_layer, should_pick_deferred, smooth_path, offset, extruder_id, previous_position, blocked_lower
                 )};
                 attach_deferred_infill(result.back().slices_extrusions, std::move(deferred_infill), lower_layer.print_z);
             }

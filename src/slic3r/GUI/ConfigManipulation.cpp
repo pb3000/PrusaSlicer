@@ -320,6 +320,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig* config)
                     "infill_speed", "bridge_speed", "over_bridge_speed", "async_infill" })
         toggle_field(el, have_infill || has_solid_infill);
 
+    // Nozzle tip clearance is only used by asynchronous infill.
+    toggle_field("nozzle_tip_outer_diameter", (have_infill || has_solid_infill) && config->opt_bool("async_infill"));
+
     const bool has_ensure_vertical_shell_thickness = config->opt_enum<EnsureVerticalShellThickness>("ensure_vertical_shell_thickness") != EnsureVerticalShellThickness::Disabled;
     toggle_field("top_solid_min_thickness", !has_spiral_vase && has_top_solid_infill && has_ensure_vertical_shell_thickness);
     toggle_field("bottom_solid_min_thickness", !has_spiral_vase && has_bottom_solid_infill && has_ensure_vertical_shell_thickness);

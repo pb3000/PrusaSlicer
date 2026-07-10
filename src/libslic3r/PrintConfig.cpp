@@ -2028,6 +2028,18 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("nozzle_tip_outer_diameter", coFloat);
+    def->label = L("Nozzle tip outer diameter");
+    def->tooltip = L("Outer diameter of the nozzle tip, used by asynchronous infill to keep clearance "
+                     "from taller material of an earlier tool. The required clearance is half the "
+                     "difference between this and the nozzle diameter (the infill extrudate reaches the "
+                     "inner diameter, so only the metal tip's overhang must clear). Set 0 to only check "
+                     "for a plain overlap. Only relevant when 'Asynchronous infill' is enabled.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
     // def = this->add("infill_only_where_needed", coBool);
     // def->label = L("Only infill where needed");
     // def->category = L("Infill");
