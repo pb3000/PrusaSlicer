@@ -2927,6 +2927,19 @@ void GCodeGenerator::initialize_instance(
     m_label_objects.update(&print_instance.print_object.instances()[print_instance.instance_id]);
 }
 
+// Asynchronous infill: first extruded point of a set of deferred infill ranges, in the same
+// (instance-local, scaled) coordinate frame as GCodeGenerator::last_position. Used to descend to
+// the lower layer's Z exactly at the infill start, so the nozzle never travels at the lower Z.
+static std::optional<Point> deferred_infill_first_point(const std::vector<GCode::ExtrusionOrder::InfillRange> &ranges)
+{
+    for (const auto &range : ranges)
+        for (const auto &smooth_path : range.items)
+            for (const auto &element : smooth_path)
+                if (! element.path.empty())
+                    return element.path.front().point;
+    return std::nullopt;
+}
+
 std::string GCodeGenerator::extrude_slices(
     const InstanceToPrint &print_instance,
     const ObjectLayerToPrint &layer_to_print,
@@ -2950,10 +2963,26 @@ std::string GCodeGenerator::extrude_slices(
         // logic (which derives its Z from it) targets the lower layer.
         if (!slice_extrusions.deferred_infill_extrusions.empty()) {
             const float saved_layer_z{m_last_layer_z};
-            m_last_layer_z = static_cast<float>(slice_extrusions.deferred_print_z);
-            gcode += m_writer.travel_to_z(m_last_layer_z, "descend for asynchronous infill");
+            const float deferred_z{static_cast<float>(slice_extrusions.deferred_print_z)};
+
+            // Approach the infill start in XY at the current (wall) height, then descend to the
+            // lower layer's Z at that XY. travel_to() keeps the whole XY move at the initial
+            // elevation and drops Z only on the final (zero-length XY) segment at the destination,
+            // so the nozzle never travels horizontally at the lower Z across the already-printed
+            // features of the layer below. If last_position is unknown, extrude_infill_ranges()
+            // itself moves in XY first and only then forces Z, which is equally safe.
+            if (const std::optional<Point> infill_start{deferred_infill_first_point(slice_extrusions.deferred_infill_extrusions)};
+                infill_start && this->last_position) {
+                const Vec3crd from{to_3d(*this->last_position, scaled(saved_layer_z))};
+                const Vec3crd to{to_3d(*infill_start, scaled(deferred_z))};
+                gcode += this->travel_to(from, to, ExtrusionRole::InternalInfill, "descend to asynchronous infill start", [](){ return std::string{}; });
+                this->last_position = *infill_start;
+            }
+
+            m_last_layer_z = deferred_z;
             gcode += this->extrude_infill_ranges(slice_extrusions.deferred_infill_extrusions, "infill");
             m_last_layer_z = saved_layer_z;
+            // Rising straight up at the infill end is always collision-free.
             gcode += m_writer.travel_to_z(m_last_layer_z, "rise after asynchronous infill");
         }
 
