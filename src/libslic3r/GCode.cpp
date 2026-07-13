@@ -2938,14 +2938,6 @@ static std::optional<Point> smooth_path_first_point(const GCode::SmoothPath &smo
     return std::nullopt;
 }
 
-static std::optional<Point> infill_range_first_point(const GCode::ExtrusionOrder::InfillRange &range)
-{
-    for (const auto &smooth_path : range.items)
-        if (const std::optional<Point> p{smooth_path_first_point(smooth_path)}; p)
-            return p;
-    return std::nullopt;
-}
-
 std::string GCodeGenerator::extrude_slices(
     const InstanceToPrint &print_instance,
     const ObjectLayerToPrint &layer_to_print,
@@ -2975,58 +2967,42 @@ std::string GCodeGenerator::extrude_slices(
             // evaluated against the current layer's perimeters (including taller material of other
             // tools at the build height), and the height avoidance lifts to the build height.
 
-            // Print each deferred region independently: travel to it in XY at the current (wall)
-            // height, descend one layer to its Z, lay its infill, then rise a layer back. So the
-            // travels *between* regions happen at the build height - a full layer above the deferred
-            // infill - and go through the normal ramped/retracted travel_to(), instead of skimming
-            // across the layer below. travel_to() keeps the XY move at the initial (wall) elevation
-            // and drops Z only on the final segment at the destination, so the nozzle never travels
-            // horizontally at the lower Z. Travels *within* a region (infill line to line) stay at
-            // the lower Z but lift / avoid over that layer's perimeters per the retraction settings.
+            // Print the deferred infill at the lower layer's Z the same way ordinary infill is
+            // printed - loop regions, then smooth paths, extrude_smooth_path() each - with one
+            // addition for the layer offset: an approach travel that leaves the internal regions
+            // (the initial descent from the build plane, a region boundary, or a line-to-line move
+            // across a perimeter) is referenced to the build height (from.z = Z_L). travel_to() then
+            // lifts to / over the build layer and descends at the destination, exactly the
+            // conditional lift ordinary infill travel does, just based at the build plane instead of
+            // the infill's lower layer. Other travels stay at the lower Z. m_layer stays the build
+            // layer, so the crossing test uses its perimeters (incl. taller material of other tools).
+            m_last_layer_z = deferred_z;
+            bool first_travel{true};
             for (const GCode::ExtrusionOrder::InfillRange &range : slice_extrusions.deferred_infill_extrusions) {
-                const std::optional<Point> range_start{infill_range_first_point(range)};
-                if (! range_start)
-                    continue;
-                if (this->last_position) {
-                    const Vec3crd from{to_3d(*this->last_position, scaled(saved_layer_z))};
-                    const Vec3crd to{to_3d(*range_start, scaled(deferred_z))};
-                    gcode += this->travel_to(from, to, ExtrusionRole::InternalInfill, "descend to asynchronous infill start", [](){ return std::string{}; });
-                    this->last_position = *range_start;
-                }
-                m_last_layer_z = deferred_z;
                 this->m_config.apply(range.region->config());
                 for (const GCode::SmoothPath &path : range.items) {
-                    // If the travel to the next infill line crosses a perimeter of the build layer,
-                    // clear it the way a normal travel would: wipe + retract, then lift to the build
-                    // height plus retract_lift (so there is real clearance over the build layer's
-                    // perimeters, which sit at the build height), then the normal travel that ramps /
-                    // avoids and descends at the destination. Non-crossing travels stay at the infill Z.
-                    if (const std::optional<Point> path_start{smooth_path_first_point(path)};
-                        path_start && this->last_position && *this->last_position != *path_start &&
-                        m_config.fill_density.value > 0 &&
-                        ! m_retract_when_crossing_perimeters.travel_inside_internal_regions(*m_layer, Polyline{*this->last_position, *path_start})) {
+                    const std::optional<Point> path_start{smooth_path_first_point(path)};
+                    if (path_start && this->last_position && *this->last_position != *path_start &&
+                        (first_travel ||
+                         (m_config.fill_density.value > 0 &&
+                          ! m_retract_when_crossing_perimeters.travel_inside_internal_regions(*m_layer, Polyline{*this->last_position, *path_start})))) {
+                        // Wipe + retract at the infill Z (the wipe is XY only, so it must run before
+                        // rising), then travel referenced to the build plane and descend at the target.
                         gcode += this->retract_and_wipe();
-                        // Base the travel at the build height (Z_L). travel_to() then applies the
-                        // normal lift on top and descends at the destination - a ramped travel_max_lift
-                        // when continuous rise (travel_ramping_lift) is enabled, otherwise a retract_lift
-                        // Z-hop - so the height profile follows the same settings as any other travel,
-                        // just referenced to the build plane instead of the infill's lower layer.
                         const Vec3crd from{to_3d(*this->last_position, scaled(saved_layer_z))};
                         const Vec3crd to{to_3d(*path_start, scaled(deferred_z))};
-                        gcode += this->travel_to(from, to, ExtrusionRole::InternalInfill, "async infill travel over perimeter", [](){ return std::string{}; });
+                        gcode += this->travel_to(from, to, ExtrusionRole::InternalInfill,
+                            first_travel ? "descend to asynchronous infill" : "async infill travel over perimeter", [](){ return std::string{}; });
                         this->last_position = *path_start;
                     }
+                    first_travel = false;
                     gcode += this->extrude_smooth_path(path, false, "infill", -1.0);
                 }
-                // Wipe + retract while still at the infill Z: the wipe moves in XY only, so it must
-                // run before rising or it would trace the infill one layer up, in the air. Retracting
-                // here also prevents oozing during the rise. reset_path() inside wipe() stops the next
-                // travel from wiping again.
-                gcode += this->retract_and_wipe();
-                m_last_layer_z = saved_layer_z;
-                // Rising straight up at the infill end is always collision-free.
-                gcode += m_writer.travel_to_z(m_last_layer_z, "rise after asynchronous infill");
             }
+            // Rise back to the build plane for the perimeters.
+            gcode += this->retract_and_wipe();
+            m_last_layer_z = saved_layer_z;
+            gcode += m_writer.travel_to_z(m_last_layer_z, "rise after asynchronous infill");
         }
 
         for (const IslandExtrusions &island_extrusions : slice_extrusions.common_extrusions) {
