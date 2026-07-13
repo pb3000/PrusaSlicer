@@ -128,9 +128,10 @@ static const t_config_enum_values s_keys_map_FuzzySkinType {
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FuzzySkinType)
 
 static const t_config_enum_values s_keys_map_IslandOrder {
-    { "nearest",  int(IslandOrder::Nearest) },
-    { "farthest", int(IslandOrder::Farthest) },
-    { "fixed",    int(IslandOrder::Fixed) }
+    { "nearest",        int(IslandOrder::Nearest) },
+    { "second_nearest", int(IslandOrder::SecondNearest) },
+    { "farthest",       int(IslandOrder::Farthest) },
+    { "fixed",          int(IslandOrder::Fixed) }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(IslandOrder)
 
@@ -2053,12 +2054,14 @@ void PrintConfigDef::init_fff_params()
                      "previous layer. 'Nearest' starts near where the previous layer ended (shortest travel, "
                      "but the turnaround area can be printed twice on top of itself at the layer change). "
                      "'Farthest' starts away from the previous layer's end, forcing a travel to a different "
-                     "area so nothing is printed twice back-to-back. 'Fixed' keeps the same area order on "
-                     "every layer.");
+                     "area so nothing is printed twice back-to-back. 'Second nearest' starts at the nearest "
+                     "area other than the one where the previous layer ended (least extra travel while still "
+                     "avoiding the double print). 'Fixed' keeps the same area order on every layer.");
     def->set_enum<IslandOrder>({
-        { "nearest",  L("Nearest") },
-        { "farthest", L("Farthest") },
-        { "fixed",    L("Fixed (same each layer)") }
+        { "nearest",        L("Nearest") },
+        { "second_nearest", L("Second nearest") },
+        { "farthest",       L("Farthest") },
+        { "fixed",          L("Fixed (same each layer)") }
     });
     def->mode = comExpert;
     def->set_default_value(new ConfigOptionEnum<IslandOrder>(IslandOrder::Nearest));

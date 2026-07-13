@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cinttypes>
+#include <limits>
 #include <set>
 
 #include "libslic3r/ClipperUtils.hpp"
@@ -241,6 +242,20 @@ std::vector<std::reference_wrapper<const LayerIsland>> get_ordered_islands(
             if (d > best) { best = d; far_seed = p; }
         }
         chain_and_reorder_layer_islands(islands_to_order, &far_seed);
+    } else if (order == IslandOrder::SecondNearest && islands_to_order.size() > 1) {
+        // Seed from the nearest island OTHER than the one nearest the previous layer's end, so the
+        // layer starts at a different area than where it just finished, with the least extra travel.
+        Point  nearest_pt = *seed;
+        Point  second_pt  = *seed;
+        double d1 = std::numeric_limits<double>::max();
+        double d2 = std::numeric_limits<double>::max();
+        for (const LayerIsland &island : lslice.islands) {
+            const Point  p = island.boundary.contour.first_point();
+            const double d = (p - *seed).cast<double>().squaredNorm();
+            if (d < d1) { d2 = d1; second_pt = nearest_pt; d1 = d; nearest_pt = p; }
+            else if (d < d2) { d2 = d; second_pt = p; }
+        }
+        chain_and_reorder_layer_islands(islands_to_order, &second_pt);
     } else {
         chain_and_reorder_layer_islands(islands_to_order, seed);
     }

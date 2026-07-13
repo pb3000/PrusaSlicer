@@ -151,9 +151,10 @@ enum class ScarfSeamPlacement {
 
 // Order in which the separate areas (islands) of a layer are printed, relative to the previous layer.
 enum class IslandOrder {
-    Nearest,   // start near where the previous layer ended (shortest travel; may stack layer starts)
-    Farthest,  // start away from the previous layer's end (avoids printing an area twice back-to-back)
-    Fixed      // deterministic order, the same on every layer
+    Nearest,        // start near where the previous layer ended (shortest travel; may stack layer starts)
+    SecondNearest,  // start at the nearest island other than the one at the previous layer's end (minimal extra travel)
+    Farthest,       // start away from the previous layer's end (max separation)
+    Fixed           // deterministic order, the same on every layer
 };
 
 enum SLAMaterial {
