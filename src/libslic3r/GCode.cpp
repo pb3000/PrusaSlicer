@@ -3006,9 +3006,12 @@ std::string GCodeGenerator::extrude_slices(
                         m_config.fill_density.value > 0 &&
                         ! m_retract_when_crossing_perimeters.travel_inside_internal_regions(*m_layer, Polyline{*this->last_position, *path_start})) {
                         gcode += this->retract_and_wipe();
-                        const double lift_z{double(saved_layer_z) + EXTRUDER_CONFIG(retract_lift)};
-                        gcode += m_writer.travel_to_z(lift_z, "async infill: lift over crossed perimeter");
-                        const Vec3crd from{to_3d(*this->last_position, scaled(lift_z))};
+                        // Base the travel at the build height (Z_L). travel_to() then applies the
+                        // normal lift on top and descends at the destination - a ramped travel_max_lift
+                        // when continuous rise (travel_ramping_lift) is enabled, otherwise a retract_lift
+                        // Z-hop - so the height profile follows the same settings as any other travel,
+                        // just referenced to the build plane instead of the infill's lower layer.
+                        const Vec3crd from{to_3d(*this->last_position, scaled(saved_layer_z))};
                         const Vec3crd to{to_3d(*path_start, scaled(deferred_z))};
                         gcode += this->travel_to(from, to, ExtrusionRole::InternalInfill, "async infill travel over perimeter", [](){ return std::string{}; });
                         this->last_position = *path_start;
