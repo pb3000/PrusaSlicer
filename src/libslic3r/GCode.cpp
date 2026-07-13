@@ -2927,15 +2927,22 @@ void GCodeGenerator::initialize_instance(
     m_label_objects.update(&print_instance.print_object.instances()[print_instance.instance_id]);
 }
 
-// Asynchronous infill: first extruded point of a deferred infill range, in the same (instance-local,
-// scaled) coordinate frame as GCodeGenerator::last_position. Used to descend to the lower layer's Z
-// exactly at the infill start, so the nozzle never travels at the lower Z.
+// Asynchronous infill: first extruded point of a smooth path / of a deferred infill range, in the
+// same (instance-local, scaled) coordinate frame as GCodeGenerator::last_position. Used to descend
+// to the lower layer's Z exactly at the infill start, so the nozzle never travels at the lower Z.
+static std::optional<Point> smooth_path_first_point(const GCode::SmoothPath &smooth_path)
+{
+    for (const auto &element : smooth_path)
+        if (! element.path.empty())
+            return element.path.front().point;
+    return std::nullopt;
+}
+
 static std::optional<Point> infill_range_first_point(const GCode::ExtrusionOrder::InfillRange &range)
 {
     for (const auto &smooth_path : range.items)
-        for (const auto &element : smooth_path)
-            if (! element.path.empty())
-                return element.path.front().point;
+        if (const std::optional<Point> p{smooth_path_first_point(smooth_path)}; p)
+            return p;
     return std::nullopt;
 }
 
@@ -2997,8 +3004,24 @@ std::string GCodeGenerator::extrude_slices(
                 }
                 m_last_layer_z = deferred_z;
                 this->m_config.apply(range.region->config());
-                for (const GCode::SmoothPath &path : range.items)
+                for (const GCode::SmoothPath &path : range.items) {
+                    // If the travel to the next infill line crosses a perimeter, lift a full layer
+                    // (to the build height) over it after the wipe+retract, then let the normal
+                    // travel run and descend at the destination - so the nozzle clears the perimeter
+                    // instead of relying on retract_lift. Non-crossing travels stay at the infill Z.
+                    if (const std::optional<Point> path_start{smooth_path_first_point(path)};
+                        path_start && this->last_position && *this->last_position != *path_start &&
+                        m_config.fill_density.value > 0 &&
+                        ! m_retract_when_crossing_perimeters.travel_inside_internal_regions(*m_layer, Polyline{*this->last_position, *path_start})) {
+                        gcode += this->retract_and_wipe();
+                        gcode += m_writer.travel_to_z(saved_layer_z, "async infill: lift over crossed perimeter");
+                        const Vec3crd from{to_3d(*this->last_position, scaled(saved_layer_z))};
+                        const Vec3crd to{to_3d(*path_start, scaled(deferred_z))};
+                        gcode += this->travel_to(from, to, ExtrusionRole::InternalInfill, "async infill travel over perimeter", [](){ return std::string{}; });
+                        this->last_position = *path_start;
+                    }
                     gcode += this->extrude_smooth_path(path, false, "infill", -1.0);
+                }
                 // Wipe + retract while still at the infill Z: the wipe moves in XY only, so it must
                 // run before rising or it would trace the infill one layer up, in the air. Retracting
                 // here also prevents oozing during the rise. reset_path() inside wipe() stops the next
