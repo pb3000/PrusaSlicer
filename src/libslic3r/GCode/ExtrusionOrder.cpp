@@ -259,7 +259,10 @@ std::set<int> blocked_infill_regions(const Print &print, const Layer &def_layer,
 
     for (size_t r = 0; r < def_layer.region_count(); ++ r) {
         const LayerRegion *rl = def_layer.get_region(int(r));
-        if (rl == nullptr || rl->slices().surfaces.empty())
+        // Test against the fillable area (inset from the slice boundary by the perimeters), not the
+        // whole region footprint - otherwise an adjacent earlier-tool region inflated by the tip
+        // clearance clips the perimeter band and falsely blocks a region whose infill is well clear.
+        if (rl == nullptr || rl->fill_expolygons().empty())
             continue;
         const int infill_tool = rl->region().config().infill_extruder.value; // 1-based
         const int tR_pos = order_pos(infill_tool);
@@ -281,7 +284,7 @@ std::set<int> blocked_infill_regions(const Print &print, const Layer &def_layer,
         }
         if (obstacle.empty())
             continue;
-        if (! intersection(rl->slices().surfaces, obstacle).empty())
+        if (! intersection(rl->fill_expolygons(), obstacle).empty())
             blocked.insert(rl->region().print_region_id());
     }
     return blocked;
