@@ -2971,18 +2971,9 @@ std::string GCodeGenerator::extrude_slices(
             const float saved_layer_z{m_last_layer_z};
             const float deferred_z{static_cast<float>(slice_extrusions.deferred_print_z)};
 
-            // The deferred infill belongs to the layer below and travels among ITS perimeters, so
-            // point the layer-dependent travel logic there for the duration of the block: retraction
-            // when crossing perimeters (only_retract_when_crossing_perimeters keys on m_layer) and
-            // avoid-crossing both then use the correct geometry, so travels between infill lines are
-            // lifted / rerouted over the perimeters they actually cross instead of the build layer's.
-            const Layer *const build_layer{m_layer};
-            const Layer *const infill_layer{m_layer != nullptr ? m_layer->lower_layer : nullptr};
-            if (infill_layer != nullptr) {
-                m_layer = infill_layer;
-                if (m_config.avoid_crossing_perimeters)
-                    m_avoid_crossing_perimeters.init_layer(*m_layer);
-            }
+            // m_layer stays the build layer (L): crossing/avoidance for the infill travels is
+            // evaluated against the current layer's perimeters (including taller material of other
+            // tools at the build height), and the height avoidance lifts to the build height.
 
             // Print each deferred region independently: travel to it in XY at the current (wall)
             // height, descend one layer to its Z, lay its infill, then rise a layer back. So the
@@ -3030,13 +3021,6 @@ std::string GCodeGenerator::extrude_slices(
                 m_last_layer_z = saved_layer_z;
                 // Rising straight up at the infill end is always collision-free.
                 gcode += m_writer.travel_to_z(m_last_layer_z, "rise after asynchronous infill");
-            }
-
-            // Restore the build layer for the perimeters / remaining extrusions.
-            if (infill_layer != nullptr) {
-                m_layer = build_layer;
-                if (m_config.avoid_crossing_perimeters && m_layer != nullptr)
-                    m_avoid_crossing_perimeters.init_layer(*m_layer);
             }
         }
 
