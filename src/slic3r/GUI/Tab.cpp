@@ -1535,6 +1535,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("infill_first");
         optgroup->append_single_option_line("async_infill");
         optgroup->append_single_option_line("nozzle_tip_outer_diameter");
+        optgroup->append_single_option_line("island_order");
 
     page = add_options_page(L("Skirt and brim"), "skirt+brim");
         category_path = "skirt-and-brim_133969#";

@@ -254,6 +254,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "infill_first"
             || opt_key == "async_infill"
             || opt_key == "nozzle_tip_outer_diameter"
+            || opt_key == "island_order"
             || opt_key == "single_extruder_multi_material"
             || opt_key == "temperature"
             || opt_key == "idle_temperature"

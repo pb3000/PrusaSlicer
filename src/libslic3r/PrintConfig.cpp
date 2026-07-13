@@ -127,6 +127,13 @@ static const t_config_enum_values s_keys_map_FuzzySkinType {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FuzzySkinType)
 
+static const t_config_enum_values s_keys_map_IslandOrder {
+    { "nearest",  int(IslandOrder::Nearest) },
+    { "farthest", int(IslandOrder::Farthest) },
+    { "fixed",    int(IslandOrder::Fixed) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(IslandOrder)
+
 static const t_config_enum_values s_keys_map_InfillPattern {
     { "rectilinear",        ipRectilinear },
     { "monotonic",          ipMonotonic },
@@ -2039,6 +2046,22 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comExpert;
     def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("island_order", coEnum);
+    def->label = L("Area print order");
+    def->tooltip = L("Order in which the separate areas (islands) of a layer are printed, relative to the "
+                     "previous layer. 'Nearest' starts near where the previous layer ended (shortest travel, "
+                     "but the turnaround area can be printed twice on top of itself at the layer change). "
+                     "'Farthest' starts away from the previous layer's end, forcing a travel to a different "
+                     "area so nothing is printed twice back-to-back. 'Fixed' keeps the same area order on "
+                     "every layer.");
+    def->set_enum<IslandOrder>({
+        { "nearest",  L("Nearest") },
+        { "farthest", L("Farthest") },
+        { "fixed",    L("Fixed (same each layer)") }
+    });
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionEnum<IslandOrder>(IslandOrder::Nearest));
 
     // def = this->add("infill_only_where_needed", coBool);
     // def->label = L("Only infill where needed");

@@ -149,6 +149,13 @@ enum class ScarfSeamPlacement {
     everywhere
 };
 
+// Order in which the separate areas (islands) of a layer are printed, relative to the previous layer.
+enum class IslandOrder {
+    Nearest,   // start near where the previous layer ended (shortest travel; may stack layer starts)
+    Farthest,  // start away from the previous layer's end (avoids printing an area twice back-to-back)
+    Fixed      // deterministic order, the same on every layer
+};
+
 enum SLAMaterial {
     slamTough,
     slamFlex,
@@ -298,6 +305,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportMaterialStyle)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportMaterialInterfacePattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SeamPosition)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ScarfSeamPlacement)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(IslandOrder)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SLADisplayOrientation)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SLAPillarConnectionMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SLASupportTreeType)
@@ -1005,6 +1013,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionBool,               infill_first))
     ((ConfigOptionBool,               async_infill))
     ((ConfigOptionFloat,              nozzle_tip_outer_diameter))
+    ((ConfigOptionEnum<IslandOrder>,  island_order))
     ((ConfigOptionInts,               max_fan_speed))
     ((ConfigOptionFloats,             max_layer_height))
     ((ConfigOptionInts,               min_fan_speed))

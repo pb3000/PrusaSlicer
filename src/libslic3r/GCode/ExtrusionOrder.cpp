@@ -211,17 +211,39 @@ std::vector<InfillRange> extract_infill_ranges(
     return result;
 }
 
-// Returns LayerIslands ordered by the shortest distance.
+// Returns LayerIslands ordered for printing. The order strategy controls how the first island of the
+// layer is chosen relative to where the previous layer ended (see PrintConfig::island_order):
+//  - Nearest:  start near the previous layer's end (shortest travel; default, original behaviour).
+//  - Farthest: start at the island farthest from the previous layer's end, so the layer starts away
+//              from where it just ended and the turnaround area is not printed twice back-to-back.
+//  - Fixed:    ignore the previous layer's end -> deterministic, the same order on every layer.
 std::vector<std::reference_wrapper<const LayerIsland>> get_ordered_islands(
     const LayerSlice &lslice,
-    const std::optional<Point> &previous_position
+    const std::optional<Point> &previous_position,
+    const IslandOrder order
 ) {
     std::vector<std::reference_wrapper<const LayerIsland>> islands_to_order;
     for (const LayerIsland &island : lslice.islands) {
         islands_to_order.emplace_back(island);
     }
 
-    chain_and_reorder_layer_islands(islands_to_order, previous_position.has_value() ? std::addressof(*previous_position) : nullptr);
+    const Point *seed = previous_position.has_value() ? std::addressof(*previous_position) : nullptr;
+    if (order == IslandOrder::Fixed || seed == nullptr) {
+        chain_and_reorder_layer_islands(islands_to_order, nullptr);
+    } else if (order == IslandOrder::Farthest && islands_to_order.size() > 1) {
+        // Seed the chaining from the island farthest from the previous layer's end (same per-island
+        // representative point chain_layer_islands uses: boundary.contour.first_point()).
+        Point  far_seed = *seed;
+        double best     = -1.;
+        for (const LayerIsland &island : lslice.islands) {
+            const Point  p = island.boundary.contour.first_point();
+            const double d = (p - *seed).cast<double>().squaredNorm();
+            if (d > best) { best = d; far_seed = p; }
+        }
+        chain_and_reorder_layer_islands(islands_to_order, &far_seed);
+    } else {
+        chain_and_reorder_layer_islands(islands_to_order, seed);
+    }
     return islands_to_order;
 }
 
@@ -303,7 +325,7 @@ std::vector<IslandExtrusions> extract_island_extrusions(
     const bool layer_defers,
     const std::set<int> &blocked_regions
 ) {
-    std::vector<std::reference_wrapper<const LayerIsland>> ordered_islands = get_ordered_islands(lslice, previous_position);
+    std::vector<std::reference_wrapper<const LayerIsland>> ordered_islands = get_ordered_islands(lslice, previous_position, print.config().island_order);
 
     std::vector<IslandExtrusions> result;
     for (const LayerIsland &island : ordered_islands) {
@@ -362,7 +384,7 @@ std::vector<InfillRange> extract_ironing_extrusions(
         return should_pick_extrusion(eec, region) && eec.role() == ExtrusionRole::Ironing;
     };
 
-    std::vector<std::reference_wrapper<const LayerIsland>> ordered_islands = get_ordered_islands(lslice, previous_position);
+    std::vector<std::reference_wrapper<const LayerIsland>> ordered_islands = get_ordered_islands(lslice, previous_position, print.config().island_order);
 
     std::vector<InfillRange> result;
     for (const LayerIsland &island : ordered_islands) {
@@ -401,7 +423,7 @@ std::vector<InfillRange> extract_deferred_infill_extrusions(
     std::vector<InfillRange> result;
     for (size_t idx : lower_layer.lslice_indices_sorted_by_print_order) {
         const LayerSlice &lslice = lower_layer.lslices_ex[idx];
-        for (const LayerIsland &island : get_ordered_islands(lslice, previous_position)) {
+        for (const LayerIsland &island : get_ordered_islands(lslice, previous_position, print.config().island_order)) {
             std::vector<InfillRange> ranges{extract_infill_ranges(
                 print, lower_layer, island, offset, previous_position, should_pick_sparse_infill, smooth_path, extruder_id
             )};
