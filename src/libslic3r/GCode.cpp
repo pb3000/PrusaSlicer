@@ -2986,6 +2986,11 @@ std::string GCodeGenerator::extrude_slices(
                 this->m_config.apply(range.region->config());
                 for (const GCode::SmoothPath &path : range.items)
                     gcode += this->extrude_smooth_path(path, false, "infill", -1.0);
+                // Wipe + retract while still at the infill Z: the wipe moves in XY only, so it must
+                // run before rising or it would trace the infill one layer up, in the air. Retracting
+                // here also prevents oozing during the rise. reset_path() inside wipe() stops the next
+                // travel from wiping again.
+                gcode += this->retract_and_wipe();
                 m_last_layer_z = saved_layer_z;
                 // Rising straight up at the infill end is always collision-free.
                 gcode += m_writer.travel_to_z(m_last_layer_z, "rise after asynchronous infill");
