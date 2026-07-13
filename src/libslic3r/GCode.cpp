@@ -2996,17 +2996,19 @@ std::string GCodeGenerator::extrude_slices(
                 m_last_layer_z = deferred_z;
                 this->m_config.apply(range.region->config());
                 for (const GCode::SmoothPath &path : range.items) {
-                    // If the travel to the next infill line crosses a perimeter, lift a full layer
-                    // (to the build height) over it after the wipe+retract, then let the normal
-                    // travel run and descend at the destination - so the nozzle clears the perimeter
-                    // instead of relying on retract_lift. Non-crossing travels stay at the infill Z.
+                    // If the travel to the next infill line crosses a perimeter of the build layer,
+                    // clear it the way a normal travel would: wipe + retract, then lift to the build
+                    // height plus retract_lift (so there is real clearance over the build layer's
+                    // perimeters, which sit at the build height), then the normal travel that ramps /
+                    // avoids and descends at the destination. Non-crossing travels stay at the infill Z.
                     if (const std::optional<Point> path_start{smooth_path_first_point(path)};
                         path_start && this->last_position && *this->last_position != *path_start &&
                         m_config.fill_density.value > 0 &&
                         ! m_retract_when_crossing_perimeters.travel_inside_internal_regions(*m_layer, Polyline{*this->last_position, *path_start})) {
                         gcode += this->retract_and_wipe();
-                        gcode += m_writer.travel_to_z(saved_layer_z, "async infill: lift over crossed perimeter");
-                        const Vec3crd from{to_3d(*this->last_position, scaled(saved_layer_z))};
+                        const double lift_z{double(saved_layer_z) + EXTRUDER_CONFIG(retract_lift)};
+                        gcode += m_writer.travel_to_z(lift_z, "async infill: lift over crossed perimeter");
+                        const Vec3crd from{to_3d(*this->last_position, scaled(lift_z))};
                         const Vec3crd to{to_3d(*path_start, scaled(deferred_z))};
                         gcode += this->travel_to(from, to, ExtrusionRole::InternalInfill, "async infill travel over perimeter", [](){ return std::string{}; });
                         this->last_position = *path_start;
