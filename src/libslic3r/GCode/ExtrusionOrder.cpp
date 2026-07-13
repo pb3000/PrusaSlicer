@@ -246,14 +246,7 @@ std::set<int> blocked_infill_regions(const Print &print, const Layer &def_layer,
         return blocked;
     const LayerTools &upper_tools = tool_ordering.tools_for_layer(upper->print_z);
     if (upper_tools.extruders.size() <= 1)
-        return blocked;
-
-    const auto order_pos = [&upper_tools](int extruder_one_based) -> int {
-        for (size_t i = 0; i < upper_tools.extruders.size(); ++ i)
-            if (int(upper_tools.extruders[i]) == extruder_one_based)
-                return int(i);
-        return int(upper_tools.extruders.size());
-    };
+        return blocked; // single tool: nothing of a different tool can cover the infill
 
     const double tip_outer = print.config().nozzle_tip_outer_diameter.value;
 
@@ -264,28 +257,33 @@ std::set<int> blocked_infill_regions(const Print &print, const Layer &def_layer,
         // clearance clips the perimeter band and falsely blocks a region whose infill is well clear.
         if (rl == nullptr || rl->fill_expolygons().empty())
             continue;
-        const int infill_tool = rl->region().config().infill_extruder.value; // 1-based
-        const int tR_pos = order_pos(infill_tool);
-        if (tR_pos <= 0)
-            continue; // nothing prints before this tool on the covering layer
+        const int infill_tool     = rl->region().config().infill_extruder.value; // 1-based
+        const int infill_print_id = rl->region().print_region_id();
 
         const double nozzle_inner = print.config().nozzle_diameter.get_at(std::max(0, infill_tool - 1));
         const double clearance    = std::max(0., (tip_outer - nozzle_inner) / 2.);
 
+        // Order-independent: block if the infill is covered on the layer above by material of a
+        // DIFFERENT tool, regardless of the per-layer alternating tool order. Using the tool order
+        // here would flicker the decision between layers (infill printed "two layers at once"); the
+        // geometric coverage by another tool is what matters and is stable across layers.
         Polygons obstacle;
         for (size_t q = 0; q < upper->region_count(); ++ q) {
             const LayerRegion *ql = upper->get_region(int(q));
             if (ql == nullptr || ql->slices().surfaces.empty())
                 continue;
-            if (order_pos(ql->region().config().perimeter_extruder.value) < tR_pos) {
-                Polygons qoff = offset(ql->slices().surfaces, float(scaled<double>(clearance)));
-                obstacle.insert(obstacle.end(), qoff.begin(), qoff.end());
-            }
+            // Skip the region's own material (printed after its deferred infill) and same-tool
+            // material (printed together, deferred infill first) - neither blocks access.
+            if (ql->region().print_region_id() == infill_print_id ||
+                ql->region().config().perimeter_extruder.value == infill_tool)
+                continue;
+            Polygons qoff = offset(ql->slices().surfaces, float(scaled<double>(clearance)));
+            obstacle.insert(obstacle.end(), qoff.begin(), qoff.end());
         }
         if (obstacle.empty())
             continue;
         if (! intersection(rl->fill_expolygons(), obstacle).empty())
-            blocked.insert(rl->region().print_region_id());
+            blocked.insert(infill_print_id);
     }
     return blocked;
 }
