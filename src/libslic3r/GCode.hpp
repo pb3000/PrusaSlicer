@@ -446,6 +446,9 @@ private:
     std::optional<Vec3d>                m_previous_layer_last_position;
     std::optional<Vec3d>                m_previous_layer_last_position_before_wipe;
     bool                                m_moved_to_first_layer_point{false};
+    // nozzle_landing: set right after a real tool change, consumed by the first perimeter of that
+    // extruder's block so its approach lands inside the part instead of on the visible perimeter.
+    bool                                m_nozzle_landing_pending{false};
 
     // This needs to be populated during the layer processing!
     std::unique_ptr<CoolingBuffer>      m_cooling_buffer;

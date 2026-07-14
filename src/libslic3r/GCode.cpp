@@ -2761,9 +2761,14 @@ LayerResult GCodeGenerator::process_layer(
     // Extrude the skirt, brim, support, perimeters, infill ordered by the extruders.
     for (const ExtruderExtrusions &extruder_extrusions : extrusions)
     {
+        const unsigned int extruder_before_change{m_writer.extruder() != nullptr ? m_writer.extruder()->id() : static_cast<unsigned int>(-1)};
         gcode += (layer_tools.has_wipe_tower && m_wipe_tower) ?
             m_wipe_tower->tool_change(*this, extruder_extrusions.extruder_id, extruder_extrusions.extruder_id == layer_tools.extruders.back()) :
             this->set_extruder(extruder_extrusions.extruder_id, print_z);
+        // nozzle_landing: arm the landing only when a real tool change happened, for this block's
+        // first perimeter (reset every block so it never carries over).
+        m_nozzle_landing_pending = m_config.nozzle_landing.value &&
+            m_writer.extruder() != nullptr && m_writer.extruder()->id() != extruder_before_change;
 
         // let analyzer tag generator aware of a role type change
         if (layer_tools.has_wipe_tower && m_wipe_tower)
@@ -3390,7 +3395,37 @@ std::string GCodeGenerator::_extrude(
         gcode += m_label_objects.maybe_change_instance(m_writer);
     }
 
-    if (!this->last_position) {
+    // nozzle_landing: on the first perimeter after a tool change, don't travel straight to the
+    // perimeter start. Travel to a point inside the part (towards the loop centre, capped at
+    // nozzle_landing_max_distance), descend and prime there, then move at printing height to the
+    // perimeter start - so the depressurized-nozzle landing and priming blob stay hidden inside and
+    // the visible perimeter begins with a pressurized nozzle.
+    bool nozzle_landed{false};
+    if (m_nozzle_landing_pending && path_attr.role.is_perimeter() && this->last_position && path.size() >= 2) {
+        m_nozzle_landing_pending = false;
+        const Point start = path.front().point;
+        Vec2d sum(0., 0.);
+        for (const auto &seg : path)
+            sum += seg.point.cast<double>();
+        const Vec2d dir = sum / double(path.size()) - start.cast<double>();
+        if (dir.squaredNorm() > double(SCALED_EPSILON) * double(SCALED_EPSILON)) {
+            const double  dist  = std::min(scaled<double>(m_config.nozzle_landing_max_distance.value), dir.norm());
+            const Point   inner = (start.cast<double>() + dir.normalized() * dist).cast<coord_t>();
+            const Vec3crd from{to_3d(*this->last_position, scaled(this->m_last_layer_z))};
+            const Vec3crd to{to_3d(inner, scaled(this->m_last_layer_z))};
+            gcode += this->travel_to(from, to, path_attr.role, "nozzle landing inside part", [this](){
+                return m_writer.multiple_extruders ? "" : m_label_objects.maybe_change_instance(m_writer);
+            });
+            gcode += this->unretract();
+            gcode += this->m_writer.travel_to_xy(this->point_to_gcode(start), "move to perimeter start after landing");
+            this->last_position = start;
+            nozzle_landed = true;
+        }
+    }
+
+    if (nozzle_landed) {
+        // Already at the perimeter start with a primed nozzle - no approach travel needed.
+    } else if (!this->last_position) {
         const double z = this->m_last_layer_z;
         const std::string comment{"move to print after unknown position"};
         gcode += this->retract_and_wipe();

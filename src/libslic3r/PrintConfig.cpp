@@ -2017,6 +2017,26 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("nozzle_landing", coBool);
+    def->label = L("Land nozzle inside part after tool change");
+    def->tooltip = L("After a tool change, instead of travelling straight to the perimeter start, the nozzle "
+                     "first travels to a point inside the part, descends and primes there, then moves at "
+                     "printing height to the perimeter start. This keeps the depressurized-nozzle start (and "
+                     "any priming blob) hidden inside the part, so the visible perimeter begins with a "
+                     "pressurized nozzle.");
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("nozzle_landing_max_distance", coFloat);
+    def->label = L("Max landing distance");
+    def->tooltip = L("Maximum distance from the perimeter start, towards the centre of the area, at which the "
+                     "nozzle lands after a tool change. The actual point is capped at this distance (and never "
+                     "past the area centre). Only used when 'Land nozzle inside part after tool change' is on.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionFloat(2.));
+
     // def = this->add("infill_only_where_needed", coBool);
     // def->label = L("Only infill where needed");
     // def->category = L("Infill");
