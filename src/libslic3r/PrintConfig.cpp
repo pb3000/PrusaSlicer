@@ -127,6 +127,13 @@ static const t_config_enum_values s_keys_map_FuzzySkinType {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FuzzySkinType)
 
+static const t_config_enum_values s_keys_map_NozzleLandingMode {
+    { "off",            int(NozzleLandingMode::Off) },
+    { "travel",         int(NozzleLandingMode::Travel) },
+    { "anchor",         int(NozzleLandingMode::Anchor) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NozzleLandingMode)
+
 static const t_config_enum_values s_keys_map_InfillPattern {
     { "rectilinear",        ipRectilinear },
     { "monotonic",          ipMonotonic },
@@ -2017,21 +2024,28 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert;
     def->set_default_value(new ConfigOptionBool(false));
 
-    def = this->add("nozzle_landing", coBool);
-    def->label = L("Land nozzle inside part after tool change");
-    def->tooltip = L("After a tool change, instead of travelling straight to the perimeter start, the nozzle "
-                     "first travels to a point inside the part, descends and primes there, then moves at "
-                     "printing height to the perimeter start. This keeps the depressurized-nozzle start (and "
-                     "any priming blob) hidden inside the part, so the visible perimeter begins with a "
-                     "pressurized nozzle.");
+    def = this->add("nozzle_landing_mode", coEnum);
+    def->label = L("Nozzle landing after tool change");
+    def->tooltip = L("How to prime the nozzle after a tool change, before the first (visible) perimeter, so it "
+                     "does not start a wall with a depressurized nozzle.\n"
+                     "Off: travel straight to the perimeter start (default behaviour).\n"
+                     "Travel: travel to a point inside the fill area, descend there, then move at printing "
+                     "height to the perimeter start (deretraction happens at the perimeter start).\n"
+                     "Anchor: print a short concentric anchor inside the fill area that flows continuously into "
+                     "the first inner perimeter, so the nozzle is primed on hidden material (requires the inner "
+                     "walls to be printed first).");
+    def->set_enum<NozzleLandingMode>({
+        { "off",        L("Off") },
+        { "travel",     L("Travel and land") },
+        { "anchor",     L("Print anchor") }
+    });
     def->mode = comExpert;
-    def->set_default_value(new ConfigOptionBool(false));
+    def->set_default_value(new ConfigOptionEnum<NozzleLandingMode>(NozzleLandingMode::Off));
 
     def = this->add("nozzle_landing_max_distance", coFloat);
     def->label = L("Max landing distance");
-    def->tooltip = L("Maximum distance from the perimeter start at which the nozzle may land after a tool "
-                     "change. The landing point is picked inside the fill area and capped at this distance. "
-                     "Only used when 'Land nozzle inside part after tool change' is on.");
+    def->tooltip = L("Travel mode: maximum distance from the perimeter start at which the nozzle may land after "
+                     "a tool change. The landing point is picked inside the fill area and capped at this distance.");
     def->sidetext = L("mm");
     def->min = 0;
     def->mode = comExpert;
@@ -2039,11 +2053,21 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("nozzle_landing_offset", coFloat);
     def->label = L("Landing inset from walls");
-    def->tooltip = L("Target distance of the landing point from the perimeters (walls): the fill area is inset "
-                     "by this amount and the landing point is chosen inside it, closest to the perimeter start. "
-                     "If the inset area is not reachable within the max landing distance, the deepest reachable "
-                     "point of the fill (farthest from the walls) is used instead. With no fill, the landing is "
-                     "skipped. Only used when 'Land nozzle inside part after tool change' is on.");
+    def->tooltip = L("Travel mode: target distance of the landing point from the perimeters (walls): the fill "
+                     "area is inset by this amount and the landing point is chosen inside it, closest to the "
+                     "perimeter start. If the inset area is not reachable within the max landing distance, the "
+                     "deepest reachable point of the fill (farthest from the walls) is used instead. With no "
+                     "fill, the landing is skipped.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionFloat(1.));
+
+    def = this->add("nozzle_landing_anchor_length", coFloat);
+    def->label = L("Anchor length");
+    def->tooltip = L("Anchor mode: length of the short concentric anchor printed inside the fill area before "
+                     "the first inner perimeter. Sparse infill under the anchor is trimmed away to avoid "
+                     "overlap; if the anchor cannot be placed cleanly it is shortened (down to nothing).");
     def->sidetext = L("mm");
     def->min = 0;
     def->mode = comExpert;

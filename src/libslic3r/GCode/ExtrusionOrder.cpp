@@ -9,6 +9,7 @@
 
 #include "libslic3r/GCode/SmoothPath.hpp"
 #include "libslic3r/ShortestPath.hpp"
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
@@ -97,6 +98,152 @@ std::optional<Point> nozzle_landing_point(const ExPolygons &fill, const Point &s
     if (reach.empty())
         return std::nullopt;
     return deepest_point(reach);
+}
+
+// nozzle_landing (Anchor mode) --------------------------------------------------------------------
+
+// Unit inward normal at p0 (perpendicular to p0->next), oriented towards the fill. Returns false if
+// neither side lands inside the fill at distance w.
+bool inward_normal(const Point &p0, const Point &next, const double w, const ExPolygons &fill, Vec2d &n_out) {
+    Vec2d dir = (next - p0).cast<double>();
+    if (dir.squaredNorm() < 1.)
+        return false;
+    dir.normalize();
+    const Vec2d n(-dir.y(), dir.x());
+    for (const double s : {1., -1.}) {
+        const Point probe = (p0.cast<double>() + s * w * n).cast<coord_t>();
+        for (const ExPolygon &ex : fill)
+            if (ex.contains(probe)) { n_out = s * n; return true; }
+    }
+    return false;
+}
+
+// Concentric lead-in of length up to `len`, one width `w` inside the perimeter (following its
+// shape), printed from deep inside towards the perimeter start P0 and ending exactly at P0. The
+// inner part is clipped to the fill (shortening fallback); empty result means "skip, no overlap".
+Polyline build_anchor_polyline(const std::vector<Point> &perimeter_pts, const double w, const double len, const ExPolygons &fill) {
+    if (perimeter_pts.size() < 2)
+        return {};
+    const Point p0 = perimeter_pts.front();
+    Vec2d n;
+    if (! inward_normal(p0, perimeter_pts[1], w, fill, n))
+        return {};
+    // Parallel inward curve following the perimeter, from near-P0 outwards, up to `len`.
+    Polyline shifted;
+    double   acc = 0.;
+    for (std::size_t i = 0; i < perimeter_pts.size(); ++ i) {
+        const Point &cur  = perimeter_pts[i];
+        const Point &prev = perimeter_pts[i == 0 ? 0 : i - 1];
+        const Point &nxt  = perimeter_pts[i + 1 < perimeter_pts.size() ? i + 1 : i];
+        Vec2d t = (nxt - prev).cast<double>();
+        if (t.squaredNorm() < 1.)
+            t = (i == 0 ? (perimeter_pts[1] - cur) : (cur - prev)).cast<double>();
+        if (t.squaredNorm() < 1.)
+            break;
+        t.normalize();
+        Vec2d ni(-t.y(), t.x());
+        if (ni.dot(n) < 0.)
+            ni = - ni;
+        shifted.points.push_back((cur.cast<double>() + w * ni).cast<coord_t>());
+        if (i > 0)
+            acc += (perimeter_pts[i] - perimeter_pts[i - 1]).cast<double>().norm();
+        if (acc >= len)
+            break;
+    }
+    if (shifted.size() < 2)
+        return {};
+    // Keep inside the fill; take the piece adjacent to P0 and orient it to start near P0.
+    const Point near0 = shifted.points.front();
+    Polyline    chosen;
+    double      bestd = std::numeric_limits<double>::max();
+    for (Polyline &pc : intersection_pl(shifted, fill)) {
+        if (pc.size() < 2)
+            continue;
+        const double df = (pc.points.front() - near0).cast<double>().squaredNorm();
+        const double db = (pc.points.back()  - near0).cast<double>().squaredNorm();
+        Polyline     cand = pc;
+        double       d = df;
+        if (db < df) { cand.reverse(); d = db; }
+        if (d < bestd) { bestd = d; chosen = cand; }
+    }
+    if (chosen.size() < 2)
+        return {};
+    chosen.reverse();                 // deep end first, near-P0 end last
+    chosen.points.push_back(p0);      // connector into the perimeter start
+    return chosen;
+}
+
+// Remove the parts of the island's infill that fall inside `buffer`, so infill does not overlap the
+// anchor. Infill paths clear of the buffer are kept untouched (arcs preserved).
+void trim_infill_under(std::vector<InfillRange> &ranges, const Polygons &buffer) {
+    if (buffer.empty())
+        return;
+    const BoundingBox bb_buf = get_extents(buffer);
+    for (InfillRange &range : ranges) {
+        std::vector<SmoothPath> kept;
+        kept.reserve(range.items.size());
+        for (SmoothPath &sp : range.items) {
+            if (sp.empty())
+                continue;
+            Points pts;
+            for (const SmoothPathElement &el : sp)
+                for (const auto &seg : el.path)
+                    pts.push_back(seg.point);
+            if (pts.size() < 2) { kept.push_back(std::move(sp)); continue; }
+            const BoundingBox bb(pts);
+            const bool overlap = bb.min.x() <= bb_buf.max.x() && bb.max.x() >= bb_buf.min.x() &&
+                                 bb.min.y() <= bb_buf.max.y() && bb.max.y() >= bb_buf.min.y();
+            if (! overlap) { kept.push_back(std::move(sp)); continue; }
+            Polyline pl;
+            pl.points = pts;
+            const ExtrusionAttributes attr = sp.front().path_attributes;
+            for (const Polyline &pc : diff_pl(pl, buffer))
+                if (pc.size() >= 2) {
+                    SmoothPath nsp;
+                    nsp.push_back(SmoothPathElement{attr, Geometry::ArcWelder::fit_path(pc.points, scaled<double>(0.02), 0.)});
+                    kept.push_back(std::move(nsp));
+                }
+        }
+        range.items = std::move(kept);
+    }
+}
+
+// Build the anchor for the first (inner) perimeter of an island and trim the infill under it.
+void apply_nozzle_anchor(const Print &print, const LayerRegion &layerm, IslandExtrusions &ie) {
+    if (ie.perimeters.empty())
+        return;
+    Perimeter &per = ie.perimeters.front();
+    if (per.extrusion_entity == nullptr)
+        return;
+    // Requires an internal perimeter to be printed first (inner-first wall order).
+    const ExtrusionRole role = per.extrusion_entity->role();
+    if (! role.is_perimeter() || role.is_external_perimeter())
+        return;
+    if (per.smooth_path.empty() || per.smooth_path.front().path.empty())
+        return;
+    const float width = per.smooth_path.front().path_attributes.width;
+    if (width <= 0.f)
+        return;
+    const double len = scaled<double>(print.config().nozzle_landing_anchor_length.value);
+    if (len <= 0.)
+        return;
+    const ExPolygons &fill = layerm.fill_expolygons();
+    if (fill.empty())
+        return;
+    const double w = scaled<double>(width);
+    // Printed perimeter points, starting at P0.
+    std::vector<Point> pts;
+    for (const SmoothPathElement &el : per.smooth_path)
+        for (const auto &seg : el.path)
+            pts.push_back(seg.point);
+    const Polyline anchor_pl = build_anchor_polyline(pts, w, len, fill);
+    if (anchor_pl.size() < 2)
+        return;   // shortened to nothing - skip, no overlap
+    trim_infill_under(ie.infill_ranges, offset(anchor_pl, float(0.6 * w)));
+    GCode::SmoothPath sp;
+    sp.push_back(SmoothPathElement{per.smooth_path.front().path_attributes,
+                                   Geometry::ArcWelder::fit_path(anchor_pl.points, scaled<double>(0.02), 0.)});
+    per.anchor = std::move(sp);
 }
 } // namespace
 
@@ -221,9 +368,9 @@ std::vector<Perimeter> extract_perimeter_extrusions(
         }
     }
 
-    // nozzle_landing: precompute a landing point inside the fill area for the first perimeter of
-    // the island (used at emit time only for the first perimeter after a tool change).
-    if (! result.empty() && print.config().nozzle_landing.value) {
+    // nozzle_landing (Travel mode): precompute a landing point inside the fill area for the first
+    // perimeter of the island (used at emit time only for the first perimeter after a tool change).
+    if (! result.empty() && print.config().nozzle_landing_mode == NozzleLandingMode::Travel) {
         if (const std::optional<Point> p0 = smooth_path_first_point(result.front().smooth_path); p0)
             result.front().landing_point = nozzle_landing_point(
                 layerm.fill_expolygons(), *p0,
@@ -356,6 +503,13 @@ std::vector<IslandExtrusions> extract_island_extrusions(
                 print, layer, island, offset, previous_position, should_pick_infill, smooth_path, extruder_id
             );
         }
+
+        // nozzle_landing (Anchor mode): build the concentric anchor for the first inner perimeter
+        // and trim the sparse infill under it (needs both perimeters and infill of the island). Only
+        // the first island of the slice can be the first perimeter after a tool change, so restrict
+        // it there - this also avoids trimming infill on islands that never emit an anchor.
+        if (print.config().nozzle_landing_mode == NozzleLandingMode::Anchor && result.size() == 1)
+            apply_nozzle_anchor(print, layerm, island_extrusions);
     }
     return result;
 }

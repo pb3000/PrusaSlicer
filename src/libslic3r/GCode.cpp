@@ -2767,7 +2767,7 @@ LayerResult GCodeGenerator::process_layer(
             this->set_extruder(extruder_extrusions.extruder_id, print_z);
         // nozzle_landing: arm the landing only when a real tool change happened, for this block's
         // first perimeter (reset every block so it never carries over).
-        m_nozzle_landing_pending = m_config.nozzle_landing.value &&
+        m_nozzle_landing_pending = m_config.nozzle_landing_mode != NozzleLandingMode::Off &&
             m_writer.extruder() != nullptr && m_writer.extruder()->id() != extruder_before_change;
 
         // let analyzer tag generator aware of a role type change
@@ -3201,21 +3201,28 @@ std::string GCodeGenerator::extrude_perimeters(
     std::string gcode{};
 
     for (const GCode::ExtrusionOrder::Perimeter &perimeter : perimeters) {
-        // nozzle_landing: on the first perimeter after a tool change, land the nozzle on a
-        // precomputed point inside the fill area and descend there, then move (retracted) to the
-        // perimeter start. Deretraction then happens at the perimeter start (in _extrude), so the Z
-        // landing stays hidden inside the part and the visible perimeter starts pressurized.
+        // nozzle_landing: prime the nozzle on the first perimeter after a tool change.
         if (m_nozzle_landing_pending) {
             m_nozzle_landing_pending = false;
-            if (perimeter.landing_point && this->last_position) {
-                if (const std::optional<Point> p0 = smooth_path_first_point(perimeter.smooth_path); p0) {
-                    const Vec3crd from{to_3d(*this->last_position, scaled(this->m_last_layer_z))};
-                    const Vec3crd to{to_3d(*perimeter.landing_point, scaled(this->m_last_layer_z))};
-                    gcode += this->travel_to(from, to, ExtrusionRole::Perimeter, "nozzle landing inside part", [this](){
-                        return m_writer.multiple_extruders ? "" : m_label_objects.maybe_change_instance(m_writer);
-                    });
-                    gcode += this->m_writer.travel_to_xy(this->point_to_gcode(*p0), "move to perimeter start after landing");
-                    this->last_position = *p0;
+            if (this->last_position) {
+                if (m_config.nozzle_landing_mode == NozzleLandingMode::Travel && perimeter.landing_point) {
+                    // Travel to a point inside the fill, descend there, then move (retracted) to the
+                    // perimeter start; deretraction happens at the perimeter start (in _extrude).
+                    if (const std::optional<Point> p0 = smooth_path_first_point(perimeter.smooth_path); p0) {
+                        const Vec3crd from{to_3d(*this->last_position, scaled(this->m_last_layer_z))};
+                        const Vec3crd to{to_3d(*perimeter.landing_point, scaled(this->m_last_layer_z))};
+                        gcode += this->travel_to(from, to, ExtrusionRole::Perimeter, "nozzle landing inside part", [this](){
+                            return m_writer.multiple_extruders ? "" : m_label_objects.maybe_change_instance(m_writer);
+                        });
+                        gcode += this->m_writer.travel_to_xy(this->point_to_gcode(*p0), "move to perimeter start after landing");
+                        this->last_position = *p0;
+                    }
+                } else if (m_config.nozzle_landing_mode == NozzleLandingMode::Anchor && perimeter.anchor && !perimeter.anchor->empty()) {
+                    // Print a short concentric anchor inside the fill that flows continuously into this
+                    // perimeter: deretraction (and pressure build-up) happens on the hidden anchor, so the
+                    // perimeter starts primed. The anchor ends at the perimeter start, so the perimeter's
+                    // extrusion below continues without a travel.
+                    gcode += this->extrude_smooth_path(*perimeter.anchor, false, "nozzle landing anchor", -1., 0);
                 }
             }
         }

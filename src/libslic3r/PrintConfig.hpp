@@ -101,6 +101,13 @@ enum class FuzzySkinType {
     All,
 };
 
+// After a tool change, how to prime the nozzle before the first (visible) perimeter.
+enum class NozzleLandingMode {
+    Off,
+    Travel,   // travel to a landing point inside the fill, descend, then move to the perimeter start
+    Anchor,   // print a short concentric anchor inside the fill flowing into the first inner perimeter
+};
+
 enum InfillPattern : int {
     ipRectilinear, ipMonotonic, ipMonotonicLines, ipAlignedRectilinear, ipGrid, ipTriangles, ipStars, ipCubic, ipLine, ipConcentric, ipHoneycomb, ip3DHoneycomb,
     ipGyroid, ipHilbertCurve, ipArchimedeanChords, ipOctagramSpiral, ipAdaptiveCubic, ipSupportCubic, ipSupportBase,
@@ -290,6 +297,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(MachineLimitsUsage)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PrintHostType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AuthorizationType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FuzzySkinType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NozzleLandingMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InfillPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(IroningType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SlicingMode)
@@ -1003,9 +1011,10 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInts,               full_fan_speed_layer))
     ((ConfigOptionFloat,              infill_acceleration))
     ((ConfigOptionBool,               infill_first))
-    ((ConfigOptionBool,               nozzle_landing))
+    ((ConfigOptionEnum<NozzleLandingMode>, nozzle_landing_mode))
     ((ConfigOptionFloat,              nozzle_landing_max_distance))
     ((ConfigOptionFloat,              nozzle_landing_offset))
+    ((ConfigOptionFloat,              nozzle_landing_anchor_length))
     ((ConfigOptionInts,               max_fan_speed))
     ((ConfigOptionFloats,             max_layer_height))
     ((ConfigOptionInts,               min_fan_speed))
