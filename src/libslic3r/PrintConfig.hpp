@@ -1005,6 +1005,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionBool,               infill_first))
     ((ConfigOptionBool,               nozzle_landing))
     ((ConfigOptionFloat,              nozzle_landing_max_distance))
+    ((ConfigOptionFloat,              nozzle_landing_offset))
     ((ConfigOptionInts,               max_fan_speed))
     ((ConfigOptionFloats,             max_layer_height))
     ((ConfigOptionInts,               min_fan_speed))

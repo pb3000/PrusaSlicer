@@ -3182,6 +3182,13 @@ std::string GCodeGenerator::extrude_infill_ranges(
     return gcode;
 }
 
+static std::optional<Point> smooth_path_first_point(const GCode::SmoothPath &sp) {
+    for (const auto &el : sp)
+        if (! el.path.empty())
+            return el.path.front().point;
+    return std::nullopt;
+}
+
 std::string GCodeGenerator::extrude_perimeters(
     const PrintRegion &region,
     const std::vector<GCode::ExtrusionOrder::Perimeter> &perimeters,
@@ -3194,6 +3201,25 @@ std::string GCodeGenerator::extrude_perimeters(
     std::string gcode{};
 
     for (const GCode::ExtrusionOrder::Perimeter &perimeter : perimeters) {
+        // nozzle_landing: on the first perimeter after a tool change, land the nozzle on a
+        // precomputed point inside the fill area and descend there, then move (retracted) to the
+        // perimeter start. Deretraction then happens at the perimeter start (in _extrude), so the Z
+        // landing stays hidden inside the part and the visible perimeter starts pressurized.
+        if (m_nozzle_landing_pending) {
+            m_nozzle_landing_pending = false;
+            if (perimeter.landing_point && this->last_position) {
+                if (const std::optional<Point> p0 = smooth_path_first_point(perimeter.smooth_path); p0) {
+                    const Vec3crd from{to_3d(*this->last_position, scaled(this->m_last_layer_z))};
+                    const Vec3crd to{to_3d(*perimeter.landing_point, scaled(this->m_last_layer_z))};
+                    gcode += this->travel_to(from, to, ExtrusionRole::Perimeter, "nozzle landing inside part", [this](){
+                        return m_writer.multiple_extruders ? "" : m_label_objects.maybe_change_instance(m_writer);
+                    });
+                    gcode += this->m_writer.travel_to_xy(this->point_to_gcode(*p0), "move to perimeter start after landing");
+                    this->last_position = *p0;
+                }
+            }
+        }
+
         double speed{-1};
         // Apply the small perimeter speed.
         if (perimeter.extrusion_entity->length() <= SMALL_PERIMETER_LENGTH)
@@ -3395,39 +3421,7 @@ std::string GCodeGenerator::_extrude(
         gcode += m_label_objects.maybe_change_instance(m_writer);
     }
 
-    // nozzle_landing: on the first perimeter after a tool change, don't travel straight to the
-    // perimeter start. Travel to a point inside the part (towards the loop centre, capped at
-    // nozzle_landing_max_distance) and descend there, then move at printing height to the perimeter
-    // start - all still retracted. Deretraction happens at the perimeter start (standard flow
-    // below), so the Z landing stays hidden inside the part while the visible perimeter begins with
-    // a freshly deretracted (pressurized) nozzle.
-    bool nozzle_landed{false};
-    if (m_nozzle_landing_pending && path_attr.role.is_perimeter() && this->last_position && path.size() >= 2) {
-        m_nozzle_landing_pending = false;
-        const Point start = path.front().point;
-        Vec2d sum(0., 0.);
-        for (const auto &seg : path)
-            sum += seg.point.cast<double>();
-        const Vec2d dir = sum / double(path.size()) - start.cast<double>();
-        if (dir.squaredNorm() > double(SCALED_EPSILON) * double(SCALED_EPSILON)) {
-            const double  dist  = std::min(scaled<double>(m_config.nozzle_landing_max_distance.value), dir.norm());
-            const Point   inner = (start.cast<double>() + dir.normalized() * dist).cast<coord_t>();
-            const Vec3crd from{to_3d(*this->last_position, scaled(this->m_last_layer_z))};
-            const Vec3crd to{to_3d(inner, scaled(this->m_last_layer_z))};
-            // Travel to the inner point and descend there (retracted - no deretraction yet).
-            gcode += this->travel_to(from, to, path_attr.role, "nozzle landing inside part", [this](){
-                return m_writer.multiple_extruders ? "" : m_label_objects.maybe_change_instance(m_writer);
-            });
-            // Move to the perimeter start at printing height, still retracted.
-            gcode += this->m_writer.travel_to_xy(this->point_to_gcode(start), "move to perimeter start after landing");
-            this->last_position = start;
-            nozzle_landed = true;
-        }
-    }
-
-    if (nozzle_landed) {
-        // Already at the perimeter start (still retracted) - the unretract below primes here.
-    } else if (!this->last_position) {
+    if (!this->last_position) {
         const double z = this->m_last_layer_z;
         const std::string comment{"move to print after unknown position"};
         gcode += this->retract_and_wipe();

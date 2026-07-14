@@ -84,6 +84,9 @@ struct Perimeter {
     bool reversed;
     const ExtrusionEntity *extrusion_entity;
     std::size_t wipe_offset;
+    // nozzle_landing: precomputed point inside the fill area to land on before this perimeter after
+    // a tool change (object-local, scaled). Set only for the first perimeter of an island.
+    std::optional<Point> landing_point;
 };
 
 struct IslandExtrusions {

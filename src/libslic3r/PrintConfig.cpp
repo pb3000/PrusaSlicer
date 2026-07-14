@@ -2029,13 +2029,25 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("nozzle_landing_max_distance", coFloat);
     def->label = L("Max landing distance");
-    def->tooltip = L("Maximum distance from the perimeter start, towards the centre of the area, at which the "
-                     "nozzle lands after a tool change. The actual point is capped at this distance (and never "
-                     "past the area centre). Only used when 'Land nozzle inside part after tool change' is on.");
+    def->tooltip = L("Maximum distance from the perimeter start at which the nozzle may land after a tool "
+                     "change. The landing point is picked inside the fill area and capped at this distance. "
+                     "Only used when 'Land nozzle inside part after tool change' is on.");
     def->sidetext = L("mm");
     def->min = 0;
     def->mode = comExpert;
-    def->set_default_value(new ConfigOptionFloat(2.));
+    def->set_default_value(new ConfigOptionFloat(5.));
+
+    def = this->add("nozzle_landing_offset", coFloat);
+    def->label = L("Landing inset from walls");
+    def->tooltip = L("Target distance of the landing point from the perimeters (walls): the fill area is inset "
+                     "by this amount and the landing point is chosen inside it, closest to the perimeter start. "
+                     "If the inset area is not reachable within the max landing distance, the deepest reachable "
+                     "point of the fill (farthest from the walls) is used instead. With no fill, the landing is "
+                     "skipped. Only used when 'Land nozzle inside part after tool change' is on.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionFloat(1.));
 
     // def = this->add("infill_only_where_needed", coBool);
     // def->label = L("Only infill where needed");

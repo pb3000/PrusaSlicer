@@ -477,7 +477,7 @@ static std::vector<std::string> s_Preset_print_options {
     "external_perimeters_first", "fill_density", "fill_pattern", "top_fill_pattern", "bottom_fill_pattern",
     "scarf_seam_placement", "scarf_seam_only_on_smooth", "scarf_seam_start_height", "scarf_seam_entire_loop", "scarf_seam_length", "scarf_seam_max_segment_length", "scarf_seam_on_inner_perimeters",
     "infill_every_layers", /*"infill_only_where_needed",*/ "solid_infill_every_layers", "fill_angle", "bridge_angle",
-    "solid_infill_below_area", "only_retract_when_crossing_perimeters", "infill_first", "nozzle_landing", "nozzle_landing_max_distance",
+    "solid_infill_below_area", "only_retract_when_crossing_perimeters", "infill_first", "nozzle_landing", "nozzle_landing_max_distance", "nozzle_landing_offset",
     "ironing", "ironing_type", "ironing_flowrate", "ironing_speed", "ironing_spacing",
     "max_print_speed", "max_volumetric_speed", "avoid_crossing_perimeters_max_detour",
     "fuzzy_skin", "fuzzy_skin_thickness", "fuzzy_skin_point_dist",

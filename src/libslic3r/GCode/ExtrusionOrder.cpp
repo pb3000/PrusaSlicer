@@ -3,9 +3,13 @@
 #include <algorithm>
 #include <cassert>
 #include <cinttypes>
+#include <cmath>
+#include <limits>
+#include <optional>
 
 #include "libslic3r/GCode/SmoothPath.hpp"
 #include "libslic3r/ShortestPath.hpp"
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
@@ -16,6 +20,85 @@
 #include "libslic3r/Print.hpp"
 
 namespace Slic3r::GCode::ExtrusionOrder {
+
+namespace {
+// nozzle_landing: pick a point inside the fill area to land the nozzle on after a tool change.
+
+// First point of a smooth path (skips empty leading elements).
+std::optional<Point> smooth_path_first_point(const GCode::SmoothPath &sp) {
+    for (const auto &el : sp)
+        if (! el.path.empty())
+            return el.path.front().point;
+    return std::nullopt;
+}
+
+// Closest point on the boundary (contour + holes) of `polys` to `p`.
+Point closest_boundary_point(const ExPolygons &polys, const Point &p) {
+    Point  best = p;
+    double best_d2 = std::numeric_limits<double>::max();
+    const auto consider = [&](const Polygon &poly) {
+        const Point  q  = poly.point_projection(p);
+        const double d2 = (q - p).cast<double>().squaredNorm();
+        if (d2 < best_d2) { best_d2 = d2; best = q; }
+    };
+    for (const ExPolygon &ex : polys) {
+        consider(ex.contour);
+        for (const Polygon &hole : ex.holes)
+            consider(hole);
+    }
+    return best;
+}
+
+// Regular polygon approximating a circle of radius r around c.
+Polygon disk_polygon(const Point &c, const double r) {
+    Polygon poly;
+    const int n = 24;
+    poly.points.reserve(n);
+    for (int i = 0; i < n; ++ i) {
+        const double a = 2. * 3.14159265358979323846 * double(i) / double(n);
+        poly.points.emplace_back(c + Point(coord_t(r * std::cos(a)), coord_t(r * std::sin(a))));
+    }
+    return poly;
+}
+
+// Deepest point (approx. pole of inaccessibility) of `region`: offset inward until it vanishes,
+// return the centroid of the last non-empty offset.
+Point deepest_point(const ExPolygons &region) {
+    const double step = scaled<double>(0.3);
+    ExPolygons   cur  = region;
+    Point        best = cur.front().contour.centroid();
+    for (int i = 0; i < 64; ++ i) {
+        const ExPolygons next = offset_ex(cur, - float(step));
+        if (next.empty())
+            break;
+        cur  = next;
+        best = cur.front().contour.centroid();
+    }
+    return best;
+}
+
+// Landing point inside `fill` for a perimeter starting at `start`. `inset` is the target clearance
+// from the walls, `max_r` caps the distance from `start`. Returns nullopt when there is no fill
+// (or none within reach), i.e. the landing should be skipped.
+std::optional<Point> nozzle_landing_point(const ExPolygons &fill, const Point &start, const double inset, const double max_r) {
+    if (fill.empty())
+        return std::nullopt;
+    // Preferred: fill inset by `inset` (target clearance), closest point to start, if within reach.
+    if (inset > 0.) {
+        const ExPolygons inner = offset_ex(fill, - float(inset));
+        if (! inner.empty()) {
+            const Point n = closest_boundary_point(inner, start);
+            if ((n - start).cast<double>().squaredNorm() <= max_r * max_r)
+                return n;
+        }
+    }
+    // Fallback: deepest (farthest-from-walls) point of the fill within reach.
+    const ExPolygons reach = intersection_ex(fill, Polygons{ disk_polygon(start, max_r) });
+    if (reach.empty())
+        return std::nullopt;
+    return deepest_point(reach);
+}
+} // namespace
 
 bool is_overriden(const ExtrusionEntityCollection &eec, const LayerTools &layer_tools, const std::size_t instance_id) {
     return layer_tools.wiping_extrusions().get_extruder_override(&eec, instance_id) > -1;
@@ -136,6 +219,16 @@ std::vector<Perimeter> extract_perimeter_extrusions(
                 }
             }
         }
+    }
+
+    // nozzle_landing: precompute a landing point inside the fill area for the first perimeter of
+    // the island (used at emit time only for the first perimeter after a tool change).
+    if (! result.empty() && print.config().nozzle_landing.value) {
+        if (const std::optional<Point> p0 = smooth_path_first_point(result.front().smooth_path); p0)
+            result.front().landing_point = nozzle_landing_point(
+                layerm.fill_expolygons(), *p0,
+                scaled<double>(print.config().nozzle_landing_offset.value),
+                scaled<double>(print.config().nozzle_landing_max_distance.value));
     }
 
     return result;
