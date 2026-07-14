@@ -3397,9 +3397,10 @@ std::string GCodeGenerator::_extrude(
 
     // nozzle_landing: on the first perimeter after a tool change, don't travel straight to the
     // perimeter start. Travel to a point inside the part (towards the loop centre, capped at
-    // nozzle_landing_max_distance), descend and prime there, then move at printing height to the
-    // perimeter start - so the depressurized-nozzle landing and priming blob stay hidden inside and
-    // the visible perimeter begins with a pressurized nozzle.
+    // nozzle_landing_max_distance) and descend there, then move at printing height to the perimeter
+    // start - all still retracted. Deretraction happens at the perimeter start (standard flow
+    // below), so the Z landing stays hidden inside the part while the visible perimeter begins with
+    // a freshly deretracted (pressurized) nozzle.
     bool nozzle_landed{false};
     if (m_nozzle_landing_pending && path_attr.role.is_perimeter() && this->last_position && path.size() >= 2) {
         m_nozzle_landing_pending = false;
@@ -3413,10 +3414,11 @@ std::string GCodeGenerator::_extrude(
             const Point   inner = (start.cast<double>() + dir.normalized() * dist).cast<coord_t>();
             const Vec3crd from{to_3d(*this->last_position, scaled(this->m_last_layer_z))};
             const Vec3crd to{to_3d(inner, scaled(this->m_last_layer_z))};
+            // Travel to the inner point and descend there (retracted - no deretraction yet).
             gcode += this->travel_to(from, to, path_attr.role, "nozzle landing inside part", [this](){
                 return m_writer.multiple_extruders ? "" : m_label_objects.maybe_change_instance(m_writer);
             });
-            gcode += this->unretract();
+            // Move to the perimeter start at printing height, still retracted.
             gcode += this->m_writer.travel_to_xy(this->point_to_gcode(start), "move to perimeter start after landing");
             this->last_position = start;
             nozzle_landed = true;
@@ -3424,7 +3426,7 @@ std::string GCodeGenerator::_extrude(
     }
 
     if (nozzle_landed) {
-        // Already at the perimeter start with a primed nozzle - no approach travel needed.
+        // Already at the perimeter start (still retracted) - the unretract below primes here.
     } else if (!this->last_position) {
         const double z = this->m_last_layer_z;
         const std::string comment{"move to print after unknown position"};
