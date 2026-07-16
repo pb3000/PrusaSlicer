@@ -1,0 +1,89 @@
+name: Build Windows (self-hosted)
+
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        description: 'Build configuration'
+        default: 'Release'
+        type: choice
+        options: [Release, RelWithDebInfo, Debug]
+      create_pdb:
+        description: 'Upload PDB artifacts'
+        default: false
+        type: boolean
+
+jobs:
+  build_win:
+    runs-on: [self-hosted, windows]
+
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+      CL: "/MP1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Detect Visual Studio
+        id: detect-vs
+        shell: powershell -ExecutionPolicy Bypass -Command "& '{0}'"
+        run: |
+          $installPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installPath) { Write-Error "No Visual Studio found"; exit 1 }
+          $vcvars = "$installPath\VC\Auxiliary\Build\vcvars64.bat"
+          if (-not (Test-Path $vcvars)) { Write-Error "vcvars64.bat not found at $vcvars"; exit 1 }
+          Write-Host "Found vcvars64.bat: $vcvars"
+          "vcvars=$vcvars" >> $env:GITHUB_OUTPUT
+
+      - name: Build dependencies
+        shell: cmd
+        run: |
+          call "${{ steps.detect-vs.outputs.vcvars }}"
+          cd deps
+          if not exist build mkdir build
+          cd build
+          cmake .. -DDESTDIR="%GITHUB_WORKSPACE%\deps\build\destdir" -DDEP_DEBUG=${{ inputs.config == 'Debug' && 'ON' || 'OFF' }}
+          if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+          cmake --build . --config ${{ inputs.config }}
+          if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+
+      - name: Build PrusaSlicer
+        shell: cmd
+        run: |
+          call "${{ steps.detect-vs.outputs.vcvars }}"
+          if not exist build mkdir build
+          cd build
+          cmake .. -DCMAKE_PREFIX_PATH="%GITHUB_WORKSPACE%\deps\build\destdir\usr\local" -DCMAKE_CONFIGURATION_TYPES=${{ inputs.config }}
+          if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+          cmake --build . --config ${{ inputs.config }}
+          if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+
+      - name: Assemble package
+        shell: powershell -ExecutionPolicy Bypass -Command "& '{0}'"
+        run: |
+          $pkg = "$env:GITHUB_WORKSPACE\package"
+          if (Test-Path $pkg) { Remove-Item -Recurse -Force $pkg }
+          New-Item -ItemType Directory -Path $pkg | Out-Null
+          Copy-Item -Recurse -Force "build\src\${{ inputs.config }}\*" $pkg
+          # Copy resources from next to the runner worker directory
+          $resDir = Join-Path (Split-Path $env:RUNNER_TOOL_CACHE) "resources"
+          if (-not (Test-Path $resDir)) { $resDir = Join-Path $env:USERPROFILE "actions-runner\resources" }
+          if (Test-Path $resDir) { Copy-Item -Recurse -Force "$resDir\*" $pkg }
+          Remove-Item "$pkg\*.pdb","$pkg\*.exp","$pkg\*.lib" -ErrorAction SilentlyContinue
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrusaSlicer-win64
+          path: package/
+
+      - name: Upload PDB
+        if: inputs.create_pdb
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrusaSlicer-PDB
+          path: build/src/${{ inputs.config }}/*.pdb
