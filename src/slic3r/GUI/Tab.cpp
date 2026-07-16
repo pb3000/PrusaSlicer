@@ -2900,6 +2900,7 @@ void TabPrinter::build_fff()
 
         optgroup = page->new_optgroup(L("Start G-Code options"));
         optgroup->append_single_option_line("autoemit_temperature_commands");
+        optgroup->append_single_option_line("autoemit_second_layer_bed_temperature");
 
         optgroup = page->new_optgroup(L("End G-code"), 0);
         optgroup->on_change = [this, &optgroup_title = optgroup->title](const t_config_option_key& opt_key, const boost::any& value) {
@@ -5164,7 +5165,7 @@ bool Tab::validate_custom_gcodes()
         if (!opt_group->is_activated())
             break;
         std::string key = opt_group->opt_map().begin()->first;
-        if (key == "autoemit_temperature_commands")
+        if (key == "autoemit_temperature_commands" || key == "autoemit_second_layer_bed_temperature")
             continue;
         valid &= validate_custom_gcode(opt_group->title, boost::any_cast<std::string>(opt_group->get_value(key)));
         if (!valid)

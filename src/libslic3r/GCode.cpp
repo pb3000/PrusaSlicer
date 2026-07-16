@@ -2720,7 +2720,8 @@ LayerResult GCodeGenerator::process_layer(
         const int  bed_temperature_extruder = print.config().bed_temperature_extruder;
         const bool use_first_extruder       = bed_temperature_extruder <= 0 || bed_temperature_extruder > num_extruders;
         const int  bed_temperature          = print.config().bed_temperature.get_at(use_first_extruder ? first_extruder_id : bed_temperature_extruder - 1);
-        gcode += m_writer.set_bed_temperature(bed_temperature);
+        if (print.config().autoemit_second_layer_bed_temperature)
+            gcode += m_writer.set_bed_temperature(bed_temperature);
 
         // Mark the temperature transition from 1st to 2nd layer to be finished.
         m_second_layer_things_done = true;

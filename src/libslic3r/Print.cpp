@@ -83,6 +83,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
     // or they are only notes not influencing the generated G-code.
     static std::unordered_set<std::string> steps_gcode = {
         "autoemit_temperature_commands",
+        "autoemit_second_layer_bed_temperature",
         "avoid_crossing_perimeters",
         "avoid_crossing_perimeters_max_detour",
         "bed_shape",

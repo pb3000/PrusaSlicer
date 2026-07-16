@@ -3180,6 +3180,16 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert;
     def->set_default_value(new ConfigOptionBool(true));
 
+    def = this->add("autoemit_second_layer_bed_temperature", coBool);
+    def->label = L("Emit bed temperature on the second layer");
+    def->tooltip = L("When enabled (default), PrusaSlicer emits the bed temperature command at the transition "
+                     "from the first to the second layer, setting the bed to the 'Other layers' bed temperature. "
+                     "Disable this to keep full control of the bed temperature on layers above the first from your "
+                     "custom layer change G-code (for example to apply a multi-material compromise bed temperature). "
+                     "This does not affect the first layer.");
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionBool(true));
+
     def = this->add("custom_parameters_printer", coString);
     def->label = L("Custom printer parameters");
     def->tooltip = custom_parameter_tooltip_templ;
